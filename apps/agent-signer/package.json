@@ -1,0 +1,26 @@
+{
+  "name": "@denaria/agent-signer",
+  "version": "0.1.0",
+  "description": "Denaria Agent Signer: keeps the Session key of the user's own AI agent and connects it to a Denaria account.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "denaria-agent-signer": "dist/denaria-agent-signer.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@denaria/agent-schemas": "workspace:*",
+    "@denaria/smart-account": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "qrcode-generator": "1.5.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}

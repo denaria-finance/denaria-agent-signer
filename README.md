@@ -1,154 +1,96 @@
-# Denaria Skills
+# Denaria Agent Signer
 
-Denaria Skills provides agent-facing instructions and local tooling for preparing Denaria Action Handoff QR codes through the official Denaria MCP endpoint.
+Denaria's official signing module for your own AI agent (Claude Code, Codex, any MCP client
+that runs local servers). It lets the agent trade GMX perpetuals on your
+[Denaria](https://denaria.finance) account **within limits you approve with your Passkey**,
+and nothing else.
 
-The repository is designed for AI agent clients that need to understand how to prepare a Denaria App/PWA handoff from a user request such as:
+- It runs where your agent runs, as a local MCP server, and keeps the agent's key in your
+  system's keyring. Denaria's servers only ever see the public key.
+- You choose the limits on your phone: markets, largest order, leverage, how often, for how
+  long. They are enforced on chain by your smart account, not by this program.
+- It can never withdraw, send funds or touch your account's security. You can revoke it at
+  any time in the Denaria app: **Settings → Access & security → Agents**.
 
-```text
-open BTC long with 50 USDC and 3x leverage on Denaria
-```
+This repository also holds the **`denaria-trading` skill** for agents (`skills/`).
 
-The output is an unsigned handoff QR that the user reviews and signs inside the Denaria App/PWA.
+## Install
 
-## Core Boundary
-
-Denaria's agentic handoff flow is intentionally prepare-only:
-
-```text
-Denaria Agent Service prepares.
-Denaria App/PWA verifies.
-The user signs.
-External agents do not execute.
-```
-
-This repository does not provide signing, custody, transaction submission, autonomous execution, private key handling, passkey handling, wallet delegation, or x402 payment authorization.
-
-## What This Repository Contains
-
-```text
-skills/denaria-action-handoff/
-  Agent skill instructions for Denaria prepare-only QR handoffs.
-
-skills/denaria-action-handoff/scripts/prepare-handoff.mjs
-  Bundled fallback script that calls Denaria MCP, downloads the QR image locally,
-  and returns qrLocalPath plus qrMarkdown for reliable chat rendering.
-
-packages/agent-pack/
-  Installable wrapper package source for clients that support stdio MCP wrappers.
-
-configs/
-  Example client configuration material for supported agent environments.
-
-docs/
-  Installation and operational notes.
-```
-
-## Official MCP Endpoint
-
-```text
-https://mcp.denaria.finance/mcp
-```
-
-The MCP service prepares the action handoff and returns QR URLs. The skill and wrapper handle client-side behavior, including downloading the QR PNG when a chat client cannot reliably render remote images.
-
-## Installation
-
-Install the Denaria skill package in clients that support `skills@latest`:
+Copy the command from the Denaria app, **Settings → Access & security → Agents → Connect an
+agent**: it pins the version. For this release, 0.1.0:
 
 ```bash
-npx skills@latest add denaria-finance/denaria-skills
+# Claude Code
+claude mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.0 --env mainnet
+
+# Codex
+codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.0 --env mainnet
 ```
 
-Then select the skill in the agent client:
+Any other MCP client: a stdio server with command `npx` and arguments
+`["-y", "@denaria/agent-signer@0.1.0", "--env", "mainnet"]`.
 
-```text
-/denaria-action-handoff
-```
+`--env mainnet` trades real funds on Arbitrum One; `--env testnet` is Denaria's test network
+on Arbitrum Sepolia (test funds, by invitation). The Signer refuses to start without one: real
+or test funds are always your choice.
 
-## Expected Agent Flow
+Requires Node.js 22 or later. The package is one file with no dependencies and no install
+scripts: `npx` downloads it and runs it, nothing else.
 
-```text
-User request
-  -> Denaria Action Handoff skill
-  -> Denaria MCP prepare tool or bundled fallback script
-  -> official Denaria MCP endpoint
-  -> unsigned handoff payload and QR URLs
-  -> QR PNG downloaded locally when needed
-  -> QR rendered in chat
-  -> Denaria App/PWA scans and verifies
-  -> user signs inside the app
-```
+## Connect
 
-The skill should not send users through the Denaria trading UI manually when MCP preparation is available. It should prepare an unsigned handoff QR for App/PWA review.
+Ask your agent to connect to Denaria. It calls the `connect` tool and shows a link, a QR code
+and a short fingerprint. Open the link on your phone, check that the fingerprint is the same,
+choose the limits and confirm with your Passkey. Ask the agent to connect again: it restates
+what it can do ("Connected. I can trade BTC and ETH, up to $50 per order, max 3x, until
+11 Nov.").
 
-## QR Rendering Strategy
+A day before the Grant expires Denaria sends you a push: one tap renews it, with the same or
+new limits, and the agent keeps the same key.
 
-Some agent clients render remote images inconsistently. To make the QR experience more reliable, the skill includes a fallback script:
+## Where the key lives
+
+| Option | Where |
+|---|---|
+| `--store keychain` (default) | The system's keyring: the macOS Keychain; on Linux the Secret Service (GNOME Keyring, KWallet…) through `secret-tool` (Debian and Ubuntu: `apt install libsecret-tools`); on Windows a file protected by DPAPI for your Windows user. |
+| `--store file` | For servers, containers and cloud sandboxes with no keyring: `~/.denaria-agent-signer/<env>.key`, AES-256-GCM under a key derived with scrypt from `DENARIA_SIGNER_PASSPHRASE` (12+ characters, required). Keep the passphrase: it is the only way to open the key. |
+
+With the file store, put the passphrase in the server entry, for example
+`claude mcp add -e DENARIA_SIGNER_PASSPHRASE=… denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.0 --env mainnet --store file`.
+
+The key never appears in a tool answer, an error, a log or a process argument.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `connect` | Creates the key on first use and connects it to your account (link, QR, fingerprint), or restates the Grant once it is live. |
+| `denaria_get_grant`, `denaria_get_positions`, `denaria_get_open_orders`, `denaria_get_balances` | Read the Grant, the positions with their take profit and stop loss, the open orders, the USDC. |
+| `denaria_create_position`, `denaria_close_position` | Open or add to a position with USDC collateral; close a position. |
+| `denaria_adjust_margin`, `denaria_set_tpsl`, `denaria_cancel_order`, `denaria_claim_funding` | Add or remove collateral; set or move the take profit and stop loss; cancel an order; claim the funding fees in USDC. |
+| `denaria_get_operation_status` | Where an operation stands, by its `dop_…` reference. |
+
+On the test network the tools are named `denaria_testnet_…`, and every answer states the
+network and when the Grant expires. Denaria prepares each operation within your Grant, the
+Signer signs it, Denaria submits it; the limits are checked again on chain.
+
+## The skill
+
+Agents that support skills can install `denaria-trading`, which tells them how to trade on
+Denaria with or without the Signer, and to be prudent (start small, explain your limits, ask
+before touching positions they did not open, report every operation):
 
 ```bash
-node skills/denaria-action-handoff/scripts/prepare-handoff.mjs --side long --market BTC --collateral 50 --leverage 3
+npx skills@latest add denaria-finance/denaria-agent-signer
 ```
 
-The script:
+## Verify a release
 
-1. normalizes the user intent;
-2. calls `https://mcp.denaria.finance/mcp`;
-3. receives the Denaria handoff QR URL;
-4. downloads the QR PNG to the user's machine;
-5. returns `qrLocalPath`, `qrMarkdown`, `qrImageUrl`, `qrPageUrl`, and `nextStep`.
+Every release is built and published by this repository's GitHub Actions, with npm provenance
+and a GitHub attestation, and must be byte-for-byte the file Denaria built. How to check it
+yourself: [SECURITY.md](SECURITY.md).
 
-Agent clients should render `qrMarkdown` or the local image path first, and treat remote QR URLs as fallbacks.
+## Licence
 
-## Optional MCP Wrapper
-
-The source for an installable wrapper package is available under `packages/agent-pack`.
-
-Once distributed as an npm package, clients that support stdio MCP wrappers can use:
-
-```bash
-npx -y @denaria/agent-pack mcp
-```
-
-The wrapper provides the same prepare-only handoff behavior as the bundled script, with a persistent MCP tool interface for compatible clients.
-
-## Safety Model
-
-Allowed:
-
-- parse a user's Denaria position intent;
-- prepare an unsigned Denaria App/PWA handoff;
-- render the QR code for review in the Denaria App/PWA;
-- provide QR page and image fallback URLs.
-
-Not allowed:
-
-- signing transactions;
-- submitting or broadcasting transactions;
-- custodying funds or keys;
-- bypassing Denaria App/PWA review;
-- treating an agent response as trade execution;
-- running autonomous trading strategies.
-
-If a user asks an external agent to execute a trade, the correct behavior is to prepare an unsigned Denaria App/PWA handoff and direct the user to review and sign inside the app.
-
-## Development
-
-Run package checks from the repository root:
-
-```bash
-npm run check
-```
-
-Run the wrapper smoke test:
-
-```bash
-npm run smoke
-```
-
-Test the bundled fallback script directly:
-
-```bash
-node skills/denaria-action-handoff/scripts/prepare-handoff.mjs --side long --market BTC --collateral 50 --leverage 3
-```
-
-A successful result includes a local QR PNG path and a Markdown image reference suitable for chat rendering.
+MIT. The source here is exported from Denaria's monorepo at every release (see
+`RELEASE.json`): changes go there, not in pull requests here.

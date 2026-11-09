@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "denaria": {
-      "command": "npx",
-      "args": ["-y", "@denaria/agent-pack", "mcp"]
-    }
-  }
-}

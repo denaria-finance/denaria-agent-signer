@@ -1,0 +1,12 @@
+{
+  "name": "@denaria/smart-account",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./session-key/webauthn-envelope": "./src/session-key/webauthn-envelope.ts"
+  },
+  "dependencies": {
+    "viem": "2.55.1"
+  }
+}

@@ -1,16 +1,12 @@
 {
-  "name": "denaria-skills",
-  "version": "0.1.0",
+  "name": "denaria-agent-signer-repo",
   "private": true,
-  "description": "Denaria agent skills and installed Action Handoff tooling",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/denaria-finance/denaria-skills"
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.22"
   },
-  "license": "MIT",
   "scripts": {
-    "check": "npm --prefix packages/agent-pack run check",
-    "smoke": "npm --prefix packages/agent-pack run smoke"
-  },
-  "packageManager": "npm@10.9.4"
+    "build": "pnpm --filter @denaria/agent-signer build",
+    "verify": "node scripts/verify-release.mjs"
+  }
 }

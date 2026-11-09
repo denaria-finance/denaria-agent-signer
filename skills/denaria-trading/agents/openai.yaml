@@ -1,0 +1,6 @@
+interface:
+  display_name: "Denaria Trading"
+  short_description: "Trade GMX perpetuals on Denaria within the user's Grant, or through a QR the user signs"
+  default_prompt: "Use $denaria-trading to show my Denaria Grant, positions and balances."
+policy:
+  allow_implicit_invocation: true
