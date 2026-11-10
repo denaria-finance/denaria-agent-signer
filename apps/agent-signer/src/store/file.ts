@@ -12,7 +12,7 @@ import type { KeyStore } from './types.js';
 
 /**
  * The key store for hosts without a usable keychain (cloud sandboxes, CI):
- * `<home>/<env>.key`, AES-256-GCM under a key scrypt derives from
+ * `<home>/<slot>.key`, AES-256-GCM under a key scrypt derives from
  * `DENARIA_SIGNER_PASSPHRASE` (agent-trading Stage 2 Q57). Written once, never
  * overwritten, rotated aside (sealed-file.ts).
  */
@@ -26,10 +26,14 @@ const SCRYPT_P = 1;
 
 const base64 = z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/);
 
+/** Version 1 is the 0.1.0 file; version 2 adds the clear slot and metadata
+ *  (sealed-file.ts). The sealed part is the same in both. */
 const keyFileSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     env: z.string(),
+    slot: z.string().optional(),
+    agent: z.unknown().optional(),
     kdf: z
       .object({
         name: z.literal('scrypt'),
@@ -59,9 +63,11 @@ function deriveKey(passphrase: string, salt: Buffer, N: number, r: number, p: nu
   });
 }
 
-/** Binds a file to its Env: a testnet file copied over the mainnet one does not open. */
-function associatedData(env: string): Buffer {
-  return Buffer.from(`denaria-agent-signer/key-file/v1/${env}`, 'utf8');
+/** Binds a file to its slot: a testnet file copied over the mainnet one, or
+ *  one agent's over another's, does not open. The 0.1.0 slot is the Env, so
+ *  its binding is unchanged. */
+function associatedData(slot: string): Buffer {
+  return Buffer.from(`denaria-agent-signer/key-file/v1/${slot}`, 'utf8');
 }
 
 function missingPassphrase(): SignerError {
@@ -95,16 +101,14 @@ export function fileKeyStore(options: {
       passphrase();
     },
     sealer: {
-      async seal(env, secret) {
+      async seal(slot, secret) {
         const salt = randomBytes(16);
         const iv = randomBytes(12);
         const key = await deriveKey(passphrase(), salt, cost, SCRYPT_R, SCRYPT_P);
         const cipher = createCipheriv('aes-256-gcm', key, iv);
-        cipher.setAAD(associatedData(env));
+        cipher.setAAD(associatedData(slot));
         const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
-        const file: KeyFile = {
-          version: 1,
-          env,
+        const sealed: Omit<KeyFile, 'version' | 'env' | 'slot' | 'agent'> = {
           kdf: { name: 'scrypt', N: cost, r: SCRYPT_R, p: SCRYPT_P, salt: salt.toString('base64') },
           cipher: {
             name: 'aes-256-gcm',
@@ -113,13 +117,13 @@ export function fileKeyStore(options: {
           },
           ciphertext: ciphertext.toString('base64'),
         };
-        return `${JSON.stringify(file, null, 2)}\n`;
+        return sealed;
       },
 
-      async open(env, raw, path) {
+      async open(slot, raw, path) {
         let file: KeyFile;
         try {
-          file = keyFileSchema.parse(JSON.parse(raw));
+          file = keyFileSchema.parse(raw);
         } catch {
           throw new SignerError(
             `${path} is not a Denaria Agent Signer key file this version can read. It was left untouched.`,
@@ -138,7 +142,7 @@ export function fileKeyStore(options: {
             key,
             Buffer.from(file.cipher.iv, 'base64'),
           );
-          decipher.setAAD(associatedData(env));
+          decipher.setAAD(associatedData(slot));
           decipher.setAuthTag(Buffer.from(file.cipher.tag, 'base64'));
           return Buffer.concat([
             decipher.update(Buffer.from(file.ciphertext, 'base64')),

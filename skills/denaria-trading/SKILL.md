@@ -29,7 +29,7 @@ Use the command the user's Denaria app shows under **Settings → Access & secur
 Connect an agent**: it pins the Signer's version. It has this shape:
 
 ```bash
-claude mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@<version> --env mainnet
+claude mcp add --scope user denaria-agent-signer -- npx -y @denaria/agent-signer@<version> --env mainnet
 codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@<version> --env mainnet
 ```
 
@@ -37,10 +37,22 @@ Run it only after the user agrees. `--env testnet` is the test network (test fun
 `--env mainnet` is real funds; never switch one for the other. On a server, a container or a
 cloud sandbox (no system keyring), add `--store file` and an environment variable
 `DENARIA_SIGNER_PASSPHRASE` (12+ characters) to the server entry, and tell the user to keep
-that passphrase. The agent may need a restart to see the new tools.
+that passphrase. Two agents of the same client on one computer each get `--name "<Agent
+name>"` at the end of their command. The agent may need a restart to see the new tools.
 
-Then call `connect`. It answers with a link, a QR code and a short fingerprint: show all
-three. The user opens the link on their phone, checks that the fingerprint is the same,
+If the install fails, or the Signer's tools do not appear or do not answer, do not guess: send
+the user to the guide in their Denaria app, `/agents/setup` on their client's tab
+(`https://denaria.app/agents/setup?client=claude-code`, `?client=codex` or `?client=other`;
+on the test network the app's address is the one the Connect an agent screen shows).
+
+Then call `connect`. The first time, it answers `choose_agent`: every agent on this computer
+has its own key, so **ask the user** the name of this agent in Denaria, proposing the one
+`connect` gives (`proposedName`, the client's own: "Claude Code", "Codex"), or which key
+already listed to reuse (name, fingerprint, Grant state). Call `connect` again with
+`{"name": "…"}` or `{"reuse": "<key id>"}`. Reusing a key shares that agent's Grant; one
+whose Grant is active trades at once. Never choose for the user. The name is the user's: they
+rename an agent in the app, never through you. Then `connect` answers with
+a link, a QR code and a short fingerprint: show all three. The user opens the link on their phone, checks that the fingerprint is the same,
 chooses the limits and confirms with their Passkey. Call `connect` again: once the Grant is
 live it restates it ("Connected. I can trade BTC and ETH, up to $50 per order, max 3x, until
 11 Nov"). Tell the user those limits in your own words.

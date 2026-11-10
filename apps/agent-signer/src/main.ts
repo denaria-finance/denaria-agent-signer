@@ -1,4 +1,5 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { fileAgentIndex } from './agent-index.js';
 import { createSignerApi } from './api.js';
 import { parseCliArgs, type StoreKind, USAGE } from './cli.js';
 import { apiBaseUrlOf, SIGNER_TARGETS, SIGNER_VERSION } from './envs.js';
@@ -42,12 +43,14 @@ async function main(): Promise<void> {
   const server = createSignerServer({
     target,
     store,
+    index: fileAgentIndex({ home: signerHome(), env: target.env }),
     api: createSignerApi({ baseUrl: apiBaseUrl }),
     log,
+    name: command.name,
   });
   await server.connect(new StdioServerTransport());
   log(
-    `${SIGNER_VERSION} serving Denaria ${target.env} (eip155:${target.chainId}) through ${apiBaseUrl}; key in ${store.describe(target.env)}`,
+    `${SIGNER_VERSION} serving Denaria ${target.env} (eip155:${target.chainId}) through ${apiBaseUrl}; keys in ${command.store === 'file' ? `encrypted files in ${signerHome()}` : "the system's keyring"}${command.name === null ? '' : `; agent ${JSON.stringify(command.name)}`}`,
   );
 }
 

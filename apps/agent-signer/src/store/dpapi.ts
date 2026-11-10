@@ -8,9 +8,9 @@ import { FILE_STORE_HINT, type KeyStore } from './types.js';
  * The Windows store: the secret sealed by DPAPI for the current Windows user
  * (`ProtectedData.Protect`, scope CurrentUser), through Windows PowerShell,
  * no native module (agent-trading Stage 2 Q57). DPAPI keeps no item, so the
- * sealed blob is a file, `<home>\<env>.dpapi`, with the sealed-file rules
+ * sealed blob is a file, `<home>\<slot>.dpapi`, with the sealed-file rules
  * (written once, rotated aside). Only the same user on the same computer opens
- * it; the entropy binds a blob to its Env.
+ * it; the entropy binds a blob to its slot.
  *
  * Both scripts are constant and read everything from stdin, one line each:
  * the entropy, then the secret or the blob. The secret is never in a process
@@ -45,16 +45,21 @@ export function windowsPowerShellPath(systemRoot = process.env.SystemRoot ?? 'C:
 
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
+/** Version 1 is the 0.1.0 blob; version 2 adds the clear slot and metadata
+ *  (sealed-file.ts). */
 const blobSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     env: z.string(),
+    slot: z.string().optional(),
+    agent: z.unknown().optional(),
     scope: z.literal('CurrentUser'),
     protected: z.string().regex(BASE64),
   })
   .strict();
 
-const entropyOf = (env: string) => `denaria-agent-signer/dpapi/v1/${env}`;
+/** Binds a blob to its slot; the 0.1.0 slot is the Env, so its entropy is unchanged. */
+const entropyOf = (slot: string) => `denaria-agent-signer/dpapi/v1/${slot}`;
 
 export function dpapiKeyStore(options: {
   home: string;
@@ -86,37 +91,31 @@ export function dpapiKeyStore(options: {
     extension: 'dpapi',
     describe: (path) => `a file Windows DPAPI protects for this user, ${path}`,
     sealer: {
-      async seal(env, secret) {
+      async seal(slot, secret) {
         // Never echo PowerShell's output into an error.
-        const result = await runScript(DPAPI_PROTECT_SCRIPT, [entropyOf(env), secret]);
+        const result = await runScript(DPAPI_PROTECT_SCRIPT, [entropyOf(slot), secret]);
         const sealed = result.stdout.trim();
         if (result.code !== 0 || !BASE64.test(sealed)) {
           throw new SignerError(
             `Windows DPAPI could not protect the key (PowerShell exited with ${result.code ?? 'a signal'}). Try again, or ${FILE_STORE_HINT}.`,
           );
         }
-        const blob: z.infer<typeof blobSchema> = {
-          version: 1,
-          env,
-          scope: 'CurrentUser',
-          protected: sealed,
-        };
-        return `${JSON.stringify(blob, null, 2)}\n`;
+        return { scope: 'CurrentUser', protected: sealed };
       },
 
-      async open(env, raw, path) {
+      async open(slot, raw, path) {
         let blob: z.infer<typeof blobSchema>;
         try {
-          blob = blobSchema.parse(JSON.parse(raw));
+          blob = blobSchema.parse(raw);
         } catch {
           throw new SignerError(
             `${path} is not a Denaria Agent Signer key file this version can read. It was left untouched.`,
           );
         }
-        const result = await runScript(DPAPI_UNPROTECT_SCRIPT, [entropyOf(env), blob.protected]);
+        const result = await runScript(DPAPI_UNPROTECT_SCRIPT, [entropyOf(slot), blob.protected]);
         if (result.code !== 0 || result.stdout === '') {
           throw new SignerError(
-            `Windows DPAPI does not open ${path}: it was protected for another Windows user or computer, or for another Env. The file was left untouched.`,
+            `Windows DPAPI does not open ${path}: it was protected for another Windows user or computer, or for another Env or key. The file was left untouched.`,
           );
         }
         return result.stdout;

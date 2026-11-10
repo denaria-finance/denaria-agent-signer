@@ -1,11 +1,11 @@
 {
   "package": "@denaria/agent-signer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "bundle": "apps/agent-signer/dist/denaria-agent-signer.mjs",
-  "sha256": "e03683342bf876ad4a8828056e1b466341f39f895dd5e178647453f4475361ff",
+  "sha256": "a6189a50ca642aac0c008681e5dd006c4b8e99d5b402e038bbfeff583f705de2",
   "repository": "denaria-finance/denaria-agent-signer",
   "source": {
     "repository": "denaria-finance/denaria-monorepo",
-    "commit": "1f76839c7720267e30e2a515487864e402ae8bf7"
+    "commit": "b49b4ad3cb02a24ac4f2eac2550e277140933803"
   }
 }

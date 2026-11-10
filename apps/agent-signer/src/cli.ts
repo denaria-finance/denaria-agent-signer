@@ -1,10 +1,19 @@
+import { AGENT_LABEL_MAX_LENGTH } from '@denaria/agent-schemas';
+import { agentNameSchema } from './client-label.js';
 import type { SignerTargetName } from './envs.js';
 import { hasSystemKeyStore } from './store/system.js';
 
 export type StoreKind = 'keychain' | 'file';
 
 export type CliCommand =
-  | { ok: true; command: 'serve'; target: SignerTargetName; store: StoreKind }
+  | {
+      ok: true;
+      command: 'serve';
+      target: SignerTargetName;
+      store: StoreKind;
+      /** `--name`: this agent's Agent name, and how the Signer recognises it. */
+      name: string | null;
+    }
   | { ok: true; command: 'version' }
   | { ok: true; command: 'help' }
   | { ok: false; message: string };
@@ -17,13 +26,15 @@ export const KEYCHAIN_PLATFORMS: ReadonlySet<NodeJS.Platform> = new Set([
 ]);
 
 export const USAGE = [
-  'Usage: denaria-agent-signer --env testnet|mainnet [--store keychain|file]',
+  'Usage: denaria-agent-signer --env testnet|mainnet [--store keychain|file] [--name "<Agent name>"]',
   '',
   '  --env testnet   Denaria demo-staging on Arbitrum Sepolia (test funds)',
   '  --env mainnet   Denaria on Arbitrum One (real funds)',
   '  --store         where the key is kept: keychain (the default: the macOS Keychain,',
   '                  the Linux Secret Service through secret-tool, Windows DPAPI) or file',
   '                  (encrypted with DENARIA_SIGNER_PASSPHRASE: servers, containers, CI)',
+  '  --name          the name of this agent in Denaria, with its own key on this computer',
+  '                  (two agents of the same client; without it the first connect asks)',
 ].join('\n');
 
 function refuse(message: string): CliCommand {
@@ -33,14 +44,14 @@ function refuse(message: string): CliCommand {
 /** The command line, or why the Signer refuses to start. Never guesses the
  *  Env: real and test funds must be a choice the user made at install. */
 export function parseCliArgs(argv: readonly string[], platform: NodeJS.Platform): CliCommand {
-  const values: Partial<Record<'env' | 'store', string>> = {};
+  const values: Partial<Record<'env' | 'store' | 'name', string>> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
     if (arg === '--version') return { ok: true, command: 'version' };
     if (arg === '--help' || arg === '-h') return { ok: true, command: 'help' };
-    const match = /^--(env|store)(?:=(.*))?$/.exec(arg);
+    const match = /^--(env|store|name)(?:=(.*))?$/.exec(arg);
     if (!match) return refuse(`Unknown argument: ${arg.slice(0, 64)}`);
-    const name = match[1] as 'env' | 'store';
+    const name = match[1] as 'env' | 'store' | 'name';
     const value = match[2] ?? argv[++i];
     if (value === undefined || value === '' || value.startsWith('--')) {
       return refuse(`--${name} needs a value.`);
@@ -68,5 +79,13 @@ export function parseCliArgs(argv: readonly string[], platform: NodeJS.Platform)
       `There is no keychain store on ${platform.slice(0, 32)}. Use --store file with DENARIA_SIGNER_PASSPHRASE set.`,
     );
   }
-  return { ok: true, command: 'serve', target: values.env, store };
+  let agentName: string | null = null;
+  if (values.name !== undefined) {
+    const parsed = agentNameSchema.safeParse(values.name);
+    if (!parsed.success) {
+      return refuse(`--name must be 1 to ${AGENT_LABEL_MAX_LENGTH} characters on one line.`);
+    }
+    agentName = parsed.data;
+  }
+  return { ok: true, command: 'serve', target: values.env, store, name: agentName };
 }

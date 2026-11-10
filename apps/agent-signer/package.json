@@ -1,6 +1,6 @@
 {
   "name": "@denaria/agent-signer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Denaria Agent Signer: keeps the Session key of the user's own AI agent and connects it to a Denaria account.",
   "private": true,
   "type": "module",

@@ -19,6 +19,27 @@ export const AGENT_CONNECT_LINK_VERSION = '1';
 /** The registry's label bound (`session_keys.device_label`). */
 export const AGENT_LABEL_MAX_LENGTH = 64;
 
+/**
+ * The PWA's "Connect an agent" guide (agent-trading Stage 2 ticket 16,
+ * ADR-0062 §18), which the Signer's messages link to. `/agents/setup`, not
+ * `/agents/connect`: the two would differ from `AGENT_CONNECT_PATH` by one
+ * letter. The tab is in `?client=`, so a link opens a client's own tab.
+ */
+export const AGENT_SETUP_PATH = '/agents/setup';
+
+/** The guide's tabs, in their order. */
+export const AGENT_SETUP_CLIENTS = ['claude-code', 'codex', 'other'] as const;
+export type AgentSetupClient = (typeof AGENT_SETUP_CLIENTS)[number];
+
+export function agentSetupPath(client?: AgentSetupClient): string {
+  return client === undefined ? AGENT_SETUP_PATH : `${AGENT_SETUP_PATH}?client=${client}`;
+}
+
+/** The guide on a PWA origin (`auth.rpOrigin` of the Env), on a tab if given. */
+export function agentSetupUrl(pwaOrigin: string, client?: AgentSetupClient): string {
+  return new URL(agentSetupPath(client), pwaOrigin).toString();
+}
+
 /** A P-256 coordinate: `0x` + 64 lowercase hex, as the registry stores it. */
 export type AgentKeyCoordinate = `0x${string}`;
 export type AgentPublicKey = { x: AgentKeyCoordinate; y: AgentKeyCoordinate };
