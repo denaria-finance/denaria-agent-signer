@@ -102,7 +102,7 @@ export function keychainKeyStore(options: {
   const failure = (action: string, code: number | null): SignerError =>
     code !== null && ACCESS_REFUSED.has(code)
       ? new SignerError(
-          `The macOS Keychain refused to ${action} (it may be locked, or this session cannot reach it). Unlock it and try again, or start the Denaria Agent Signer with --store file and DENARIA_SIGNER_PASSPHRASE set.`,
+          `The macOS Keychain refused to ${action} (it may be locked, or this session cannot reach it: over SSH, run security unlock-keychain in that session first; Codex runs its servers from a background codex app-server, which must be started on the Mac itself, not over SSH). Unlock it and try again, or start the Denaria Agent Signer with --store file and DENARIA_SIGNER_PASSPHRASE set.`,
         )
       : new SignerError(
           `The macOS Keychain could not ${action} (security exited with ${code ?? 'a signal'}). Try again, or start the Denaria Agent Signer with --store file and DENARIA_SIGNER_PASSPHRASE set.`,

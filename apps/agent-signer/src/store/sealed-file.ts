@@ -117,6 +117,7 @@ export function sealedFileKeyStore(options: {
 
   return {
     describe: (slot) => options.describe(pathOf(slot)),
+    ready: () => options.ready?.(),
 
     async load(slot) {
       const path = pathOf(slot);

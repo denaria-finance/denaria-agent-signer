@@ -41,9 +41,10 @@ that passphrase. Two agents of the same client on one computer each get `--name 
 name>"` at the end of their command. The agent may need a restart to see the new tools.
 
 If the install fails, or the Signer's tools do not appear or do not answer, do not guess: send
-the user to the guide in their Denaria app, `/agents/setup` on their client's tab
-(`https://denaria.app/agents/setup?client=claude-code`, `?client=codex` or `?client=other`;
-on the test network the app's address is the one the Connect an agent screen shows).
+the user to the guide in their Denaria app, Settings → Access & security → Connect an agent, on
+their client's tab (`https://denaria.app/portfolio?settings=connect-agent&client=claude-code`,
+`&client=codex` or `&client=other`, once they are logged in; on the test network the app's
+address is the one the Connect an agent screen shows).
 
 Then call `connect`. The first time, it answers `choose_agent`: every agent on this computer
 has its own key, so **ask the user** the name of this agent in Denaria, proposing the one

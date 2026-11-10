@@ -612,6 +612,7 @@ export function createSignerServer(options: {
     }
     try {
       return await serialized(async () => {
+        store.ready?.();
         const identity = identityOf();
         const known = await slotOf(name);
         if (known !== null) {

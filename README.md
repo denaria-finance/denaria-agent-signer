@@ -17,18 +17,18 @@ This repository also holds the **`denaria-trading` skill** for agents (`skills/`
 ## Install
 
 Copy the command from the Denaria app, **Settings → Access & security → Agents → Connect an
-agent**: it pins the version. For this release, 0.1.1:
+agent**: it pins the version. For this release, 0.1.2:
 
 ```bash
 # Claude Code
-claude mcp add --scope user denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.1 --env mainnet
+claude mcp add --scope user denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet
 
 # Codex
-codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.1 --env mainnet
+codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet
 ```
 
 Any other MCP client: a stdio server with command `npx` and arguments
-`["-y", "@denaria/agent-signer@0.1.1", "--env", "mainnet"]`.
+`["-y", "@denaria/agent-signer@0.1.2", "--env", "mainnet"]`.
 
 `--env mainnet` trades real funds on Arbitrum One; `--env testnet` is Denaria's test network
 on Arbitrum Sepolia (test funds, by invitation). The Signer refuses to start without one: real
@@ -41,7 +41,9 @@ Requires Node.js 22 or later. The package is one file with no dependencies and n
 scripts: `npx` downloads it and runs it, nothing else.
 
 Problems installing, or a Signer that does not answer: follow the guide in the Denaria app,
-[https://denaria.app/agents/setup](https://denaria.app/agents/setup), on your client's tab.
+Settings → Access & security → Connect an agent, on your client's tab
+([https://denaria.app/portfolio?settings=connect-agent](https://denaria.app/portfolio?settings=connect-agent)
+opens it once you are logged in).
 
 ## Connect
 
@@ -65,7 +67,7 @@ follows.
 | `--store file` | For servers, containers and cloud sandboxes with no keyring: one file per key in `~/.denaria-agent-signer/`, AES-256-GCM under a key derived with scrypt from `DENARIA_SIGNER_PASSPHRASE` (12+ characters, required). Keep the passphrase: it is the only way to open the key. |
 
 With the file store, put the passphrase in the server entry, for example
-`claude mcp add --scope user -e DENARIA_SIGNER_PASSPHRASE=… denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.1 --env mainnet --store file`.
+`claude mcp add --scope user -e DENARIA_SIGNER_PASSPHRASE=… denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet --store file`.
 
 The key never appears in a tool answer, an error, a log or a process argument, and never
 leaves this computer: a new computer is a new key and a new Grant. The Signer keeps a small

@@ -23,6 +23,10 @@ export interface KeyStore {
   /** The items this store holds for `env`, without their secrets: what the
    *  local index is rebuilt from. */
   list(env: string): Promise<KeyItem[]>;
+  /** Throws when this store cannot keep a key at all (the encrypted file
+   *  without its passphrase): `connect` checks it first, before an agent is
+   *  asked for a name. Absent: nothing to check. */
+  ready?(): void;
 }
 
 /** What a key item carries besides its secret, written when the item is

@@ -21,18 +21,22 @@ export const AGENT_LABEL_MAX_LENGTH = 64;
 
 /**
  * The PWA's "Connect an agent" guide (agent-trading Stage 2 ticket 16,
- * ADR-0062 §18), which the Signer's messages link to. `/agents/setup`, not
- * `/agents/connect`: the two would differ from `AGENT_CONNECT_PATH` by one
- * letter. The tab is in `?client=`, so a link opens a client's own tab.
+ * ADR-0062 §18), which the Signer's messages link to: a page of Settings
+ * (Access & security → Connect an agent), opened over Portfolio by the
+ * Settings deep link `?settings=connect-agent`. Portfolio, not Trade: Trade
+ * redirects to a market and would drop the query. The tab is in `?client=`,
+ * so a link opens a client's own tab. A link opened logged out leads to the
+ * login, not to the guide.
  */
-export const AGENT_SETUP_PATH = '/agents/setup';
+export const AGENT_SETUP_SETTINGS_PAGE = 'connect-agent';
 
 /** The guide's tabs, in their order. */
 export const AGENT_SETUP_CLIENTS = ['claude-code', 'codex', 'other'] as const;
 export type AgentSetupClient = (typeof AGENT_SETUP_CLIENTS)[number];
 
 export function agentSetupPath(client?: AgentSetupClient): string {
-  return client === undefined ? AGENT_SETUP_PATH : `${AGENT_SETUP_PATH}?client=${client}`;
+  const page = `/portfolio?settings=${AGENT_SETUP_SETTINGS_PAGE}`;
+  return client === undefined ? page : `${page}&client=${client}`;
 }
 
 /** The guide on a PWA origin (`auth.rpOrigin` of the Env), on a tab if given. */

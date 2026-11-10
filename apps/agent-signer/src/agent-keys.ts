@@ -17,11 +17,16 @@ import { type KeyStore, newSlot } from './store/types.js';
 export function agentKeys(options: { env: string; store: KeyStore; index: AgentIndex }) {
   const { env, store, index } = options;
   // Once per process, the first time an identity is not found: the index may
-  // be missing (a new home, a deleted folder) or have unreadable entries.
-  let merged = false;
+  // be missing (a new home, a deleted folder) or have unreadable entries. The
+  // listing carries no secret, and says whether the 0.1.0 key exists: deciding
+  // who gets it reads no key (a Keychain that refuses is met only by the
+  // caller that trades with it).
+  let listed: Set<string> | null = null;
   const merge = async () => {
-    await index.rebuild(await store.list(env));
-    merged = true;
+    const items = await store.list(env);
+    await index.rebuild(items);
+    listed = new Set(items.map((item) => item.slot));
+    return items;
   };
 
   return {
@@ -30,12 +35,12 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
     async resolve(identity: string, claimName: string | null): Promise<string | null> {
       const known = await index.slotOf(identity);
       if (known !== null) return known;
-      if (!merged) {
+      if (listed === null) {
         await merge();
         const rebuilt = await index.slotOf(identity);
         if (rebuilt !== null) return rebuilt;
       }
-      if ((await store.load(env)) === null) return null;
+      if (!listed?.has(env)) return null;
       if (!(await index.claimLegacy(identity))) return null;
       // The rebuild may have recorded it unnamed (it has no metadata): the
       // claimer names it, until the first Grant read brings Denaria's label.
@@ -71,9 +76,7 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
     /** The keys the store holds for this Env, with their latest names and
      *  who uses them, oldest first. */
     async onComputer(): Promise<IndexedKey[]> {
-      const items = await store.list(env);
-      await index.rebuild(items);
-      merged = true;
+      const items = await merge();
       const present = new Set(items.map((item) => item.slot));
       return (await index.keys())
         .filter((key) => present.has(key.slot))

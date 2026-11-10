@@ -1,5 +1,5 @@
 /** Kept equal to `package.json` by `test/envs.test.ts`. */
-export const SIGNER_VERSION = '0.1.1';
+export const SIGNER_VERSION = '0.1.2';
 
 export const SIGNER_NAME = 'denaria-agent-signer';
 
