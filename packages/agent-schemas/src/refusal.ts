@@ -13,7 +13,7 @@ const REFUSAL_CATEGORIES = ['user', 'system', 'dependency'] as const;
 const REFUSAL_NEXT_ACTIONS = ['correct_request', 'retry_later', 'prepare_new', 'none'] as const;
 
 type RefusalDefinition = {
-  readonly httpStatus: 400 | 404 | 405 | 409 | 410 | 413 | 429 | 500 | 503;
+  readonly httpStatus: 400 | 403 | 404 | 405 | 408 | 409 | 410 | 413 | 429 | 500 | 503;
   readonly category: (typeof REFUSAL_CATEGORIES)[number];
   readonly retryable: boolean;
   readonly message: string;
@@ -53,6 +53,13 @@ export const AGENT_REFUSALS = {
     retryable: false,
     message: 'The request body exceeds the supported size.',
     nextAction: 'correct_request',
+  },
+  'REQUEST.TIMEOUT': {
+    httpStatus: 408,
+    category: 'user',
+    retryable: true,
+    message: 'The request body did not arrive in time.',
+    nextAction: 'retry_later',
   },
   'TOOL.INPUT_INVALID': {
     httpStatus: 400,
@@ -122,6 +129,13 @@ export const AGENT_REFUSALS = {
     category: 'user',
     retryable: false,
     message: 'This handoff was prepared for another Denaria network.',
+    nextAction: 'none',
+  },
+  'HANDOFF.NOT_AVAILABLE': {
+    httpStatus: 403,
+    category: 'user',
+    retryable: false,
+    message: 'This feature is not available for this account.',
     nextAction: 'none',
   },
   'HANDOFF.TAMPERED': {

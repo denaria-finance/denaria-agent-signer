@@ -4,6 +4,12 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { SignerError } from '../errors.js';
 import {
+  claimRotation,
+  type RotationClaim,
+  rotationClaimName,
+  rotationClaimTime,
+} from './rotation.js';
+import {
   assertPlainSlot,
   isSlotOf,
   type KeyItem,
@@ -19,7 +25,8 @@ import {
  * written once and never replaced by `save`, so a wrong passphrase or a second
  * connect can never destroy the key a Grant may already trust. Only `replace`
  * (rotation after a revoked Grant) swaps it, keeping the old file aside as
- * `<slot>.<extension>.replaced-<ms>`.
+ * `<slot>.<extension>.replaced-<fingerprint of the old key>`: that name is the
+ * rotation's claim (rotation.ts), so one process rotates a key.
  *
  * Format version 2 (ticket 15) adds, in clear, the slot and the item's
  * metadata (`agent`: Agent name, who created it, when); version 1 (the 0.1.0
@@ -43,7 +50,7 @@ const clearFieldsSchema = z.union([
     slot: z.string(),
     agent: z.object({
       name: z.string().nullable(),
-      identity: z.string(),
+      identity: z.string().nullable(),
       createdAt: z.string(),
     }),
   }),
@@ -91,6 +98,27 @@ export function sealedFileKeyStore(options: {
       await handle.close();
     }
     return temporary;
+  };
+
+  /** Claims the rotation of the file at `path` (Q125): the old file is kept
+   *  aside under the claim's name, a hard link (never copied or rewritten)
+   *  that fails when another process claimed this rotation first, as `save`'s
+   *  link does. With no old file to keep, the name is created empty. */
+  const claimAside = async (
+    path: string,
+    aside: string,
+    file: string,
+    claim: RotationClaim,
+  ): Promise<boolean> => {
+    try {
+      await link(path, aside);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') return false;
+      if (code !== 'ENOENT') throw error;
+    }
+    return claimRotation(options.home, file, claim);
   };
 
   const notReadable = (path: string) =>
@@ -161,23 +189,25 @@ export function sealedFileKeyStore(options: {
       }
     },
 
-    async replace(slot, secret, meta) {
+    async replace(slot, claim, secret, meta) {
       const path = pathOf(slot);
+      const file = `${slot}.${options.extension}`;
+      const aside = join(options.home, rotationClaimName(file, claim));
+      // Sealed and written first, so the claim is followed at once by the swap.
       const temporary = await writeTemporary(slot, secret, meta);
       try {
-        // The old file stays aside under a new name (a hard link, so it is
-        // never copied or rewritten), then the new one takes the name in one
-        // rename: there is no instant without a key file.
-        try {
-          await link(path, `${path}.replaced-${Date.now()}`);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
+        if (!(await claimAside(path, aside, file, claim))) return false;
         await rename(temporary, path);
+        return true;
       } catch {
-        await unlink(temporary).catch(() => undefined);
         throw new SignerError(`The new key file could not be written to ${path}.`);
+      } finally {
+        await unlink(temporary).catch(() => undefined);
       }
+    },
+
+    rotationClaimedAt(slot, claim) {
+      return rotationClaimTime(options.home, `${slot}.${options.extension}`, claim);
     },
 
     async list(env) {

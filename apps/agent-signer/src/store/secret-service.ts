@@ -1,5 +1,13 @@
 import { SignerError } from '../errors.js';
-import type { ToolRunner } from './run-tool.js';
+import {
+  findSystemTool,
+  SECRET_TOOL_ENV,
+  type SystemToolFs,
+  systemToolEnv,
+  UnsafeSystemToolError,
+} from '../system-tool.js';
+import { claimKeyringRotation, rotationClaimTime } from './rotation.js';
+import type { ToolResult, ToolRunner } from './run-tool.js';
 import {
   assertPlainSlot,
   FILE_STORE_HINT,
@@ -16,9 +24,10 @@ import {
  * process argument. One item per slot: attributes service
  * `denaria-agent-signer`, account = slot (the Env for the 0.1.0 key), the same
  * as the macOS Keychain. Ticket 15 (ADR-0062 §18): an item made since also
- * carries `env`, `agent-name` (when there is one), `agent-identity` and
- * `created-at`. Found through PATH: distributions install it in different
- * places.
+ * carries `env`, `agent-name` (when there is one), `agent-identity` (when it
+ * names its creator) and `created-at`. Found in a fixed system directory,
+ * never through PATH, root's and writable by root only, and run with only
+ * what it needs to reach the session (system-tool.ts, Q149).
  *
  * Listing: `search` prints each item's path, label, secret (the keyring
  * unlocked) and dates on stdout and its attributes on stderr, with nothing on
@@ -33,6 +42,10 @@ import {
  * first asks `search`, which lists an item without unlocking it. A lookup that
  * came back empty because the keyring was locked, or its unlock prompt was
  * dismissed, then fails instead of overwriting the key a Grant trusts.
+ *
+ * A rotation is claimed before the old item is cleared, with an empty file
+ * `<home>/<slot>.secret-service.replaced-<fingerprint of the old key>` (Q125,
+ * rotation.ts).
  */
 
 export const SECRET_SERVICE_NAME = 'denaria-agent-signer';
@@ -40,18 +53,32 @@ const SECRET_TOOL = 'secret-tool';
 
 const FALLBACK = `or ${FILE_STORE_HINT}`;
 
-export function secretServiceKeyStore(options: { run: ToolRunner; service?: string }): KeyStore {
+export function secretServiceKeyStore(options: {
+  run: ToolRunner;
+  /** The Signer's home, where a rotation is claimed (rotation.ts). */
+  home: string;
+  service?: string;
+  /** Where secret-tool is looked up: the real file system but in tests. */
+  fs?: SystemToolFs;
+}): KeyStore {
   const service = options.service ?? SECRET_SERVICE_NAME;
 
+  const notInstalled = () =>
+    new SignerError(
+      `secret-tool is not installed, so the Linux keyring cannot keep the key. Install it (Debian and Ubuntu: apt install libsecret-tools; Fedora: dnf install libsecret) ${FALLBACK}.`,
+    );
+
   const run = async (argv: readonly string[], stdin: string) => {
+    const tool = await findSystemTool(SECRET_TOOL, options.fs).catch((error: unknown) => {
+      throw error instanceof UnsafeSystemToolError
+        ? new SignerError(`${error.message} Fix it, ${FALLBACK}.`)
+        : error;
+    });
+    if (tool === null) throw notInstalled();
     try {
-      return await options.run(SECRET_TOOL, argv, stdin);
+      return await options.run(tool, argv, stdin, { env: systemToolEnv(SECRET_TOOL_ENV) });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        throw new SignerError(
-          `secret-tool is not installed, so the Linux keyring cannot keep the key. Install it (Debian and Ubuntu: apt install libsecret-tools; Fedora: dnf install libsecret) ${FALLBACK}.`,
-        );
-      }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw notInstalled();
       throw new SignerError(`secret-tool could not be started. Try again, ${FALLBACK}.`);
     }
   };
@@ -68,6 +95,9 @@ export function secretServiceKeyStore(options: { run: ToolRunner; service?: stri
       [
         'store',
         `--label=Denaria Agent Signer (${slot})`,
+        // GOption reads options anywhere before `--`: an Agent name such as
+        // `-h` would print the usage, exit 0 and store nothing (Q150).
+        '--',
         'service',
         service,
         'account',
@@ -75,8 +105,7 @@ export function secretServiceKeyStore(options: { run: ToolRunner; service?: stri
         'env',
         meta.env,
         ...(meta.name === null ? [] : ['agent-name', meta.name]),
-        'agent-identity',
-        meta.identity,
+        ...(meta.identity === null ? [] : ['agent-identity', meta.identity]),
         'created-at',
         meta.createdAt,
       ],
@@ -85,13 +114,18 @@ export function secretServiceKeyStore(options: { run: ToolRunner; service?: stri
     if (result.code !== 0) throw failure('save the key');
   };
 
+  // The attribute values of lookup, search and clear are the service name
+  // and a plain slot (assertPlainSlot): none starts with `-`.
+  const lookup = (slot: string) => run(['lookup', 'service', service, 'account', slot], '');
+  const secretOf = (result: ToolResult) => result.stdout.replace(/\r?\n$/, '');
+
   return {
     describe: (slot) => `the Secret Service keyring (service ${service}, account ${slot})`,
 
     async load(slot) {
       assertPlainSlot(slot);
-      const result = await run(['lookup', 'service', service, 'account', slot], '');
-      if (result.code === 0) return result.stdout.replace(/\r?\n$/, '');
+      const result = await lookup(slot);
+      if (result.code === 0) return secretOf(result);
       // secret-tool exits 1 for "no such item" without a word; anything it
       // says is a keyring it could not reach.
       if (result.code === 1 && result.stderr.trim() === '') return null;
@@ -110,18 +144,36 @@ export function secretServiceKeyStore(options: { run: ToolRunner; service?: stri
       await store(slot, secret, meta);
     },
 
-    // Rotation after a revoked Grant. `store` replaces only an item with the
-    // very same attributes, and the new item's metadata differs from the old
-    // one's: the old item is cleared first, so a lookup can never find the
-    // revoked key beside the new one. A failure in between leaves no key,
-    // and connect makes one; the old key's Grant is revoked anyway.
-    async replace(slot, secret, meta) {
+    // Rotation after a revoked Grant, claimed in the Signer's home first
+    // (Q125): of two Signers that found one key revoked, one replaces it.
+    // `store` replaces only an item with the very same attributes, and the
+    // new item's metadata differs from the old one's: the old item is cleared
+    // first, so a lookup can never find the revoked key beside the new one. A
+    // failure in between leaves no key, and connect makes one; the old key's
+    // Grant is revoked anyway.
+    rotationClaimedAt(slot, claim) {
+      return rotationClaimTime(options.home, `${slot}.secret-service`, claim);
+    },
+
+    async replace(slot, claim, secret, meta) {
       assertPlainSlot(slot);
+      if (!(await claimKeyringRotation(options.home, `${slot}.secret-service`, claim))) {
+        return false;
+      }
       const cleared = await run(['clear', 'service', service, 'account', slot], '');
       if (cleared.code !== 0 && !(cleared.code === 1 && cleared.stderr.trim() === '')) {
         throw failure('replace the key');
       }
       await store(slot, secret, meta);
+      // A store that exits 0 without storing must not count as a rotation
+      // (Q150): the new key is read back before connect gives its link.
+      const stored = await lookup(slot);
+      if (stored.code !== 0 || secretOf(stored) !== secret) {
+        throw new SignerError(
+          `The Linux keyring did not keep the new key for ${slot} (service ${service}), so the rotation is not done. Try connect again, ${FALLBACK}.`,
+        );
+      }
+      return true;
     },
 
     async list(env) {

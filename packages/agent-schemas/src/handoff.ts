@@ -22,9 +22,8 @@ export const AGENT_OPERATION_STATUS_SCHEMA_VERSION = 'denaria.agent.operation-st
 export const AGENT_PROPOSAL_TTL_MS = 10 * 60_000;
 export const AGENT_CLIENT_INTENT_ID_MAX_LENGTH = 64;
 export const AGENT_HANDOFF_REFERENCE_PREFIX = 'dhr_' as const;
-/** The PWA route that opens a handoff: `/agent/handoff/<reference>#<digest hint>`. */
+/** The PWA route that opens a handoff: `/agent/handoff/<reference>#<Proposal hash, 64 hex>`. */
 export const AGENT_HANDOFF_PATH_PREFIX = '/agent/handoff/' as const;
-export const AGENT_PROPOSAL_DIGEST_HINT_LENGTH = 8;
 
 /** Canonical ISO-8601 UTC instant, exactly as `Date#toISOString` writes it. */
 export const agentUtcTimestampSchema = z
@@ -203,31 +202,50 @@ export function createAgentHandoffReference(): string {
   return `${AGENT_HANDOFF_REFERENCE_PREFIX}${base64url}`;
 }
 
-/** The first hex characters of the hash: a mismatch hint, never trusted as proof. */
-export function digestHintOf(proposalHash: string): string {
-  return proposalHash.slice(2, 2 + AGENT_PROPOSAL_DIGEST_HINT_LENGTH);
+/**
+ * The Proposal hash as a handoff link carries it after the # (and the agent
+ * service's QR page in its path): all 64 hex, without `0x` (Q148). It is the
+ * hash the agent service checked covers its draft, so the PWA can refuse a
+ * Proposal the API serves with other terms; a prefix of it could be ground.
+ */
+export function agentHandoffDigestOf(proposalHash: string): string {
+  if (!/^0x[0-9a-f]{64}$/.test(proposalHash)) throw new Error('Invalid proposal hash');
+  return proposalHash.slice(2);
 }
 
-/** The link the QR encodes: the env's PWA origin, the reference, the digest hint. */
+/** What a handoff link may carry after the #: the whole hash, or, for one
+ *  release after Q148 (a link lives 10 minutes), the first 8 hex the links
+ *  made before carry. */
+// TRANSITION (Q148): to accept only the whole hash, drop `|[0-9a-f]{8}` here.
+const HANDOFF_LINK_DIGEST = /^(?:[0-9a-f]{64}|[0-9a-f]{8})$/;
+
+/** Whether a link's digest is this Proposal hash (a prefix only for a link of
+ *  the transition's 8 hex). */
+export function agentHandoffDigestMatches(proposalHash: string, digest: string): boolean {
+  return HANDOFF_LINK_DIGEST.test(digest) && proposalHash.startsWith(`0x${digest}`);
+}
+
+/** The link the QR encodes: the env's PWA origin, the reference, the Proposal hash. */
 export function agentHandoffUrl(pwaOrigin: string, reference: string, proposalHash: string) {
-  return `${new URL(pwaOrigin).origin}${AGENT_HANDOFF_PATH_PREFIX}${reference}#${digestHintOf(proposalHash)}`;
+  return `${new URL(pwaOrigin).origin}${AGENT_HANDOFF_PATH_PREFIX}${reference}#${agentHandoffDigestOf(proposalHash)}`;
 }
 
-/** Reads a handoff link back (PWA side). Null when it is not one. */
+/** Reads a handoff link back (PWA side). Null when it is not one, a link
+ *  without the Proposal hash included (Q148). One trailing slash is allowed:
+ *  the PWA's host (Amplify) answers every path with a 301 to `path/`, keeping
+ *  the fragment, so the browser opens that one. */
 export function parseAgentHandoffUrl(
   pathname: string,
   hash: string,
-): { reference: string; digestHint: string | null } | null {
+): { reference: string; digest: string } | null {
   if (!pathname.startsWith(AGENT_HANDOFF_PATH_PREFIX)) return null;
   const reference = agentHandoffReferenceSchema.safeParse(
-    pathname.slice(AGENT_HANDOFF_PATH_PREFIX.length),
+    pathname.slice(AGENT_HANDOFF_PATH_PREFIX.length).replace(/\/$/, ''),
   );
   if (!reference.success) return null;
-  const hint = hash.replace(/^#/, '');
-  return {
-    reference: reference.data,
-    digestHint: /^[0-9a-f]{8}$/.test(hint) ? hint : null,
-  };
+  const digest = hash.replace(/^#/, '');
+  if (!HANDOFF_LINK_DIGEST.test(digest)) return null;
+  return { reference: reference.data, digest };
 }
 
 /**

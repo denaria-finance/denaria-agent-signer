@@ -83,7 +83,9 @@ export function parseCliArgs(argv: readonly string[], platform: NodeJS.Platform)
   if (values.name !== undefined) {
     const parsed = agentNameSchema.safeParse(values.name);
     if (!parsed.success) {
-      return refuse(`--name must be 1 to ${AGENT_LABEL_MAX_LENGTH} characters on one line.`);
+      return refuse(
+        `--name must be 1 to ${AGENT_LABEL_MAX_LENGTH} characters on one line, not starting with -.`,
+      );
     }
     agentName = parsed.data;
   }

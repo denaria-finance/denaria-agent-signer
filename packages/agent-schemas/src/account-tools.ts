@@ -35,7 +35,7 @@ export const denariaGetGrant = {
   name: 'denaria_get_grant',
   title: 'What this agent may do on Denaria',
   description:
-    'The Grant the user approved for this agent with their Passkey: the markets it may trade, the largest order and leverage, how many operations per window, and when it expires. The limits are enforced on-chain. Tell the user before the Grant expires: they renew it in the Denaria app (Settings → Access & security → Agents).',
+    'The Grant the user approved for this agent with their Passkey: the markets it may trade, the largest size per operation (the orders of one operation together) and the leverage, whether it may place pending limit and stop orders and remove margin, how many operations per window, and when it expires. The limits are enforced on-chain. In its markets the Grant also covers the positions the user opened by hand. Tell the user before the Grant expires: they renew it in the Denaria app (Settings → Access & security → Agents).',
   input: noInput,
   output: agentGrantSchema,
   annotations: ACCOUNT_READ,

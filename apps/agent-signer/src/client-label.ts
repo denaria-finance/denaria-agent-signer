@@ -25,14 +25,16 @@ export function labelFromClient(clientName: string | undefined): string | null {
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 /** An Agent name the user gives (`--name`, connect's `name`): trimmed, 1 to
- *  64 characters, on one line. It reaches the link, the index and the key
- *  stores' metadata. */
+ *  64 characters, on one line, not starting with `-`. It reaches the link,
+ *  the index and the key stores' metadata, on Linux as an argument of
+ *  `secret-tool`, which must never read it as an option (Q150). */
 export const agentNameSchema = z
   .string()
   .trim()
   .min(1)
   .max(AGENT_LABEL_MAX_LENGTH)
-  .refine((name) => !CONTROL.test(name), 'no control characters');
+  .refine((name) => !CONTROL.test(name), 'no control characters')
+  .refine((name) => !name.startsWith('-'), 'not starting with -');
 
 /** How the index recognises a caller that gave no `--name`: its declared MCP
  *  client name, tidied and bounded, never shown as an Agent name. */

@@ -17,18 +17,18 @@ This repository also holds the **`denaria-trading` skill** for agents (`skills/`
 ## Install
 
 Copy the command from the Denaria app, **Settings → Access & security → Agents → Connect an
-agent**: it pins the version. For this release, 0.1.2:
+agent**: it pins the version. For this release, 0.1.3:
 
 ```bash
 # Claude Code
-claude mcp add --scope user denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet
+claude mcp add --scope user denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.3 --env mainnet
 
 # Codex
-codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet
+codex mcp add denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.3 --env mainnet
 ```
 
 Any other MCP client: a stdio server with command `npx` and arguments
-`["-y", "@denaria/agent-signer@0.1.2", "--env", "mainnet"]`.
+`["-y", "@denaria/agent-signer@0.1.3", "--env", "mainnet"]`.
 
 `--env mainnet` trades real funds on Arbitrum One; `--env testnet` is Denaria's test network
 on Arbitrum Sepolia (test funds, by invitation). The Signer refuses to start without one: real
@@ -49,10 +49,13 @@ opens it once you are logged in).
 
 Ask your agent to connect to Denaria. The first time, it asks you the agent's name (it proposes
 its own, "Claude Code" or "Codex"), or which key already on this computer to reuse: every
-agent has its own key, Grant and limits. Then it shows a link, a QR code and a short
-fingerprint. Open the link on your phone, check that the fingerprint is the same,
+agent has its own key, Grant and limits. Reusing a key asks you to approve that agent in the app with
+your Passkey; until then it reads and trades nothing. Then it shows a link, a QR code and a short
+connection code, new with every link (the QR is an image made on your computer, and also text; if
+you cannot see it, ask the agent to open it in a window). Open the link on your phone, check that
+the connection code is the same,
 choose the limits and confirm with your Passkey. Ask the agent to connect again: it restates
-what it can do ("Connected. I can trade BTC and ETH, up to $50 per order, max 3x, until
+what it can do ("Connected. I can trade BTC and ETH, up to $50 per operation, max 3x, until
 11 Nov.").
 
 A day before the Grant expires Denaria sends you a push: one tap renews it, with the same or
@@ -67,7 +70,7 @@ follows.
 | `--store file` | For servers, containers and cloud sandboxes with no keyring: one file per key in `~/.denaria-agent-signer/`, AES-256-GCM under a key derived with scrypt from `DENARIA_SIGNER_PASSPHRASE` (12+ characters, required). Keep the passphrase: it is the only way to open the key. |
 
 With the file store, put the passphrase in the server entry, for example
-`claude mcp add --scope user -e DENARIA_SIGNER_PASSPHRASE=… denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.2 --env mainnet --store file`.
+`claude mcp add --scope user -e DENARIA_SIGNER_PASSPHRASE=… denaria-agent-signer -- npx -y @denaria/agent-signer@0.1.3 --env mainnet --store file`.
 
 The key never appears in a tool answer, an error, a log or a process argument, and never
 leaves this computer: a new computer is a new key and a new Grant. The Signer keeps a small
@@ -77,7 +80,7 @@ index without secrets in `~/.denaria-agent-signer/agents/` (which agent uses whi
 
 | Tool | What it does |
 |---|---|
-| `connect` | Asks the agent's name on first use (or which key on this computer to reuse), creates its key and connects it to your account (link, QR, fingerprint), or restates the Grant once it is live. |
+| `connect` | Asks the agent's name on first use (or which key on this computer to reuse), creates its key and connects it to your account (link, QR, connection code), or restates the Grant once it is live. |
 | `denaria_get_grant`, `denaria_get_positions`, `denaria_get_open_orders`, `denaria_get_balances` | Read the Grant, the positions with their take profit and stop loss, the open orders, the USDC. |
 | `denaria_create_position`, `denaria_close_position` | Open or add to a position with USDC collateral; close a position. |
 | `denaria_adjust_margin`, `denaria_set_tpsl`, `denaria_cancel_order`, `denaria_claim_funding` | Add or remove collateral; set or move the take profit and stop loss; cancel an order; claim the funding fees in USDC. |

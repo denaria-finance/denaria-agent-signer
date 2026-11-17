@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { RotationClaim } from './rotation.js';
 
 /**
  * Where the Signer keeps the secrets of its Session keys, one item per slot
@@ -17,9 +18,16 @@ export interface KeyStore {
    *  durably stored. Never replaces an existing key. */
   save(slot: string, secret: string, meta: KeyItemMeta): Promise<void>;
   /** Replaces the key of `slot` with a new one (rotation after a revoked
-   *  Grant, ADR-0062 §11), with the metadata of the new item: atomic where the
-   *  store allows it, resolves once the new secret is durable. */
-  replace(slot: string, secret: string, meta: KeyItemMeta): Promise<void>;
+   *  Grant, ADR-0062 §11), with the metadata of the new item. First claims
+   *  the rotation away from the key the caller loaded (`claim`, Q125), with
+   *  an exclusive create: false when another process claimed it first, and
+   *  nothing is written. True once the new secret is durable; atomic where
+   *  the store allows it. */
+  replace(slot: string, claim: RotationClaim, secret: string, meta: KeyItemMeta): Promise<boolean>;
+  /** When `claim` on `slot` was made, in milliseconds since the epoch, or
+   *  null when no one made it: a Signer that lost a rotation takes it over
+   *  only from a stale claim (Q135). */
+  rotationClaimedAt(slot: string, claim: RotationClaim): Promise<number | null>;
   /** The items this store holds for `env`, without their secrets: what the
    *  local index is rebuilt from. */
   list(env: string): Promise<KeyItem[]>;
@@ -36,8 +44,11 @@ export type KeyItemMeta = {
   env: string;
   /** The Agent name the key was created with (null: the client declared none). */
   name: string | null;
-  /** Who created it: `name:<--name>` or `client:<clientInfo.name>`. */
-  identity: string;
+  /** Who created it: `name:<--name>` or `client:<clientInfo.name>`. A
+   *  rotation carries the old item's creator over (Q123); null when the old
+   *  item named none (the 0.1.0 key) or could not be read: a rebuilt index
+   *  then maps no one to the slot. */
+  identity: string | null;
   createdAt: string;
 };
 

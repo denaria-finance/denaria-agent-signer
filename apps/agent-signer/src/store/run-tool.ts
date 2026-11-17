@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
  * Runs one of the operating system's own tools (macOS `security`, Linux
  * `secret-tool`, Windows PowerShell), the secret on stdin and never in an
  * argument another user could list (agent-trading Stage 2 Q57). No shell:
- * the arguments reach the tool as given.
+ * the arguments reach the tool as given. Without `env` the tool inherits the
+ * Signer's environment; the Linux tools get their own (system-tool.ts, Q149).
  */
 export type ToolResult = { code: number | null; stdout: string; stderr: string };
 
@@ -12,11 +13,16 @@ export type ToolRunner = (
   file: string,
   argv: readonly string[],
   stdin: string,
+  options?: { env?: NodeJS.ProcessEnv },
 ) => Promise<ToolResult>;
 
-export const runTool: ToolRunner = (file, argv, stdin) =>
+export const runTool: ToolRunner = (file, argv, stdin, options = {}) =>
   new Promise((resolve, reject) => {
-    const child = spawn(file, [...argv], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(file, [...argv], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      ...(options.env === undefined ? {} : { env: options.env }),
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {

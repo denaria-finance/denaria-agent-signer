@@ -6,7 +6,8 @@ import { runTool } from './run-tool.js';
 import { secretServiceKeyStore } from './secret-service.js';
 import type { KeyStore } from './types.js';
 
-/** Where the Signer keeps its files: the encrypted key and the DPAPI blob. */
+/** Where the Signer keeps its files: the encrypted key, the DPAPI blob, the
+ *  agent index and the claims of rotations (rotation.ts). */
 export const signerHome = (): string =>
   process.env.DENARIA_SIGNER_HOME ?? join(homedir(), '.denaria-agent-signer');
 
@@ -15,8 +16,8 @@ export const signerHome = (): string =>
  * agent-trading Stage 2 Q57). The one list of the platforms that have one.
  */
 const SYSTEM_KEY_STORES: Partial<Record<NodeJS.Platform, () => KeyStore>> = {
-  darwin: () => keychainKeyStore({ run: runSecurity }),
-  linux: () => secretServiceKeyStore({ run: runTool }),
+  darwin: () => keychainKeyStore({ run: runSecurity, home: signerHome() }),
+  linux: () => secretServiceKeyStore({ run: runTool, home: signerHome() }),
   win32: () =>
     dpapiKeyStore({ home: signerHome(), run: runTool, powershell: windowsPowerShellPath() }),
 };

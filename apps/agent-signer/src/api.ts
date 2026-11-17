@@ -61,6 +61,32 @@ const errorSchema = z.object({
 });
 
 const MAX_ANSWER_BYTES = 1024 * 1024;
+
+/** The answer's body as text, or null past `limit` bytes: read as a stream and
+ *  counted before anything is decoded or kept past the limit (scan P-09), so a
+ *  hostile or broken API cannot make the Signer buffer an unbounded answer. */
+async function boundedText(response: Response, limit: number): Promise<string | null> {
+  const declared = Number(response.headers.get('content-length') ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (response.body === null) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 const MAX_MESSAGE = 512;
 
 /** API text is shown to the user through the agent: printable and bounded. */
@@ -101,18 +127,18 @@ export function createSignerApi(options: {
   ): Promise<unknown> {
     const url = new URL(`/trpc/${procedure}`, options.baseUrl);
     let response: Response;
-    let text: string;
+    let text: string | null;
     try {
       response = await doFetch(url, {
         ...init,
         redirect: 'error',
         signal: AbortSignal.timeout(timeoutMs),
       });
-      text = await response.text();
+      text = await boundedText(response, MAX_ANSWER_BYTES);
     } catch {
       throw new ApiUnreachable(`The Denaria API (${where}) did not answer. Try again shortly.`);
     }
-    if (text.length > MAX_ANSWER_BYTES) {
+    if (text === null) {
       throw new ApiUnreachable(`The Denaria API (${where}) answered too much.`);
     }
     let json: unknown;

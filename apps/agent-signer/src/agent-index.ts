@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { link, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { AGENT_REUSE_REFERENCE } from '@denaria/agent-schemas';
 import { z } from 'zod';
 import type { KeyItem } from './store/types.js';
 
@@ -14,7 +15,7 @@ import type { KeyItem } from './store/types.js';
  * rewrite together:
  *
  *   <home>/agents/<env>/keys/<slot>.json          { slot, name, createdAt }
- *   <home>/agents/<env>/clients/<sha256>[.n].json { identity, slot }
+ *   <home>/agents/<env>/clients/<sha256>[.n].json { identity, slot, reuse? }
  *   <home>/agents/<env>/legacy-claim.json         { identity }
  *
  * An entry is written whole under a private name and hard-linked to its own
@@ -25,7 +26,22 @@ import type { KeyItem } from './store/types.js';
  * rewritten, so Signers that find it unreadable at once still agree on one
  * slot. The stores carry each key's creation metadata, so a lost index is
  * rebuilt from them (`rebuild`).
+ *
+ * A caller that took a key another agent made at `connect` (`reuse`) carries
+ * the request in its mapping (ticket 20, grill Q102): when it asked and the
+ * one-time reference its links carry. Until the owner installs a Grant of
+ * that key enrolled with the reference, with the Passkey, the caller signs
+ * nothing. The request is in the same immutable entry as the mapping, so it
+ * can go only with it; a rebuilt index maps only the agent that made each key.
  */
+export type ReuseRequest = {
+  /** When the caller asked, on this computer's clock (shown, never compared). */
+  requestedAt: string;
+  /** 16 random bytes, base64url (`AGENT_REUSE_REFERENCE`): the reuse link
+   *  carries it, and only a Grant enrolled with it approves this caller. */
+  reference: string;
+};
+
 export type IndexedKey = {
   slot: string;
   name: string | null;
@@ -37,8 +53,11 @@ export type IndexedKey = {
 export interface AgentIndex {
   /** The slot `identity` uses, or null. */
   slotOf(identity: string): Promise<string | null>;
-  /** Maps `identity` to `slot` unless it already maps: the slot it maps to. */
-  map(identity: string, slot: string): Promise<string>;
+  /** Maps `identity` to `slot` unless it already maps: the slot it maps to.
+   *  A reuse request goes with a new mapping only. */
+  map(identity: string, slot: string, reuse?: ReuseRequest): Promise<string>;
+  /** The reuse request `identity`'s mapping carries, or null. */
+  reuseOf(identity: string): Promise<ReuseRequest | null>;
   /** Records a key unless it is there already. */
   addKey(key: { slot: string; name: string | null; createdAt: string | null }): Promise<void>;
   /** Forgets a key entry nobody maps to (one made by a lost race). */
@@ -60,7 +79,16 @@ const keySchema = z.object({
   name: z.string().nullable(),
   createdAt: z.string().nullable(),
 });
-const clientSchema = z.object({ identity: z.string(), slot: z.string() });
+const clientSchema = z.object({
+  identity: z.string(),
+  slot: z.string(),
+  reuse: z
+    .object({
+      requestedAt: z.string(),
+      reference: z.string().regex(AGENT_REUSE_REFERENCE),
+    })
+    .optional(),
+});
 const claimSchema = z.object({ identity: z.string() });
 
 const SLOT_FILE = /^([a-z0-9][a-z0-9-]{0,63})\.json$/;
@@ -143,21 +171,33 @@ export function fileAgentIndex(options: { home: string; env: string }): AgentInd
     await mkdir(clientsDir, { recursive: true, mode: 0o700 });
   };
 
+  const mappingOf = async (identity: string) => {
+    for (let generation = 0; generation < MAX_CLIENT_GENERATIONS; generation++) {
+      const entry = await readEntry(clientPath(identity, generation), clientSchema);
+      if (entry === undefined) return null;
+      if (entry?.identity === identity) return entry;
+    }
+    return null;
+  };
+
   const index: AgentIndex = {
     async slotOf(identity) {
-      for (let generation = 0; generation < MAX_CLIENT_GENERATIONS; generation++) {
-        const entry = await readEntry(clientPath(identity, generation), clientSchema);
-        if (entry === undefined) return null;
-        if (entry?.identity === identity) return entry.slot;
-      }
-      return null;
+      return (await mappingOf(identity))?.slot ?? null;
     },
 
-    async map(identity, slot) {
+    async reuseOf(identity) {
+      return (await mappingOf(identity))?.reuse ?? null;
+    },
+
+    async map(identity, slot, reuse) {
       await ready();
       for (let generation = 0; generation < MAX_CLIENT_GENERATIONS; generation++) {
         const path = clientPath(identity, generation);
-        if (await createEntry(path, { identity, slot })) return slot;
+        if (
+          await createEntry(path, { identity, slot, ...(reuse === undefined ? {} : { reuse }) })
+        ) {
+          return slot;
+        }
         const entry = await readEntry(path, clientSchema);
         if (entry?.identity === identity) return entry.slot;
         // A file that does not parse (or, never in practice, another

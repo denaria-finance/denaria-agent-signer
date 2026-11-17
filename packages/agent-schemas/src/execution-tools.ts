@@ -5,9 +5,13 @@ import {
   agentClientIntentIdSchema,
   agentUtcTimestampSchema,
 } from './handoff.js';
-import { agentPrepareCreatePositionInputSchema, agentUsdcAmountSchema } from './handoff-prepare.js';
+import {
+  agentLeverageSchema,
+  agentPrepareCreatePositionInputSchema,
+  agentUsdcAmountSchema,
+} from './handoff-prepare.js';
 import { agentNetworkSchema } from './network.js';
-import { boundedString } from './primitives.js';
+import { boundedString, ethAddressSchema, marketIdSchema } from './primitives.js';
 
 /**
  * The Denaria Agent Signer's execution tools (ADR-0062 §13, agent-trading
@@ -61,6 +65,7 @@ export const AGENT_EXECUTION_ACTIONS = [
   'close_position',
   'adjust_margin',
   'set_tpsl',
+  'place_limit_order',
   'cancel_order',
   'claim_funding',
 ] as const;
@@ -90,17 +95,75 @@ export const agentOperationSchema = z
 
 export type AgentOperation = z.infer<typeof agentOperationSchema>;
 
+/** A uint256 as decimal text, as `agent_operations.user_op` stores it. */
+const uintTextSchema = z.string().regex(/^(0|[1-9][0-9]{0,77})$/, 'must be a decimal uint256');
+const bytesHexSchema = (maxBytes: number) =>
+  z
+    .string()
+    .regex(/^0x([0-9a-f]{2})*$/, 'must be lowercase hex bytes')
+    .max(2 + maxBytes * 2);
+
+/**
+ * The ERC-4337 v0.7 UserOp the API prepared, every field the hash covers
+ * (ticket 20, grill Q101): the Signer recomputes the hash for its own chain
+ * and EntryPoint and decodes the call data before it signs. Addresses and
+ * bytes lowercase, integers decimal text. `signature` is the placeholder the
+ * hash ignores.
+ */
+export const agentUserOpSchema = z
+  .object({
+    sender: ethAddressSchema,
+    nonce: uintTextSchema,
+    factory: ethAddressSchema.optional(),
+    factoryData: bytesHexSchema(32_000).optional(),
+    callData: bytesHexSchema(64_000),
+    callGasLimit: uintTextSchema,
+    verificationGasLimit: uintTextSchema,
+    preVerificationGas: uintTextSchema,
+    maxFeePerGas: uintTextSchema,
+    maxPriorityFeePerGas: uintTextSchema,
+    paymaster: ethAddressSchema.optional(),
+    paymasterVerificationGasLimit: uintTextSchema.optional(),
+    paymasterPostOpGasLimit: uintTextSchema.optional(),
+    paymasterData: bytesHexSchema(4_000).optional(),
+    signature: bytesHexSchema(4_000),
+  })
+  .strict();
+
+export type AgentUserOp = z.infer<typeof agentUserOpSchema>;
+
+/** The catalog market the API resolved the tool's market to (a trade, a
+ *  margin change, a TP/SL); the Signer holds the call data to it. */
+export const agentOperationMarketSchema = z
+  .object({
+    marketId: marketIdSchema,
+    /** Quoted in the Signer's refusals, so plain ticker characters only. */
+    assetTicker: z.string().regex(/^[A-Za-z0-9._+/-]{1,32}$/, 'must be a ticker'),
+    gmxMarketAddress: ethAddressSchema,
+    /** For a limit or stop order and a TP/SL: GMX stores a trigger as
+     *  USD × 10^(30 − these decimals), so the Signer needs them to read it. */
+    indexTokenDecimals: z.number().int().min(0).max(30).optional(),
+  })
+  .strict();
+
+export type AgentOperationMarket = z.infer<typeof agentOperationMarketSchema>;
+
 /**
  * Between the API and the Signer, not shown to the agent: what to sign next
- * (a userOp hash; one more after a relay fault) or the operation as it
- * stands. The Signer builds the WebAuthn envelope from the hash itself.
+ * (the whole UserOp and the hash the API computed; one more after a relay
+ * fault, the same call data on the same nonce) or the operation as it stands.
+ * The Signer checks the UserOp against the tool's request, computes the hash
+ * itself and builds the WebAuthn envelope from it (ADR-0062 §13).
  */
 export const agentOperationStepSchema = z.discriminatedUnion('step', [
   z
     .object({
       step: z.literal('sign'),
       reference: agentOperationReferenceSchema,
+      userOp: agentUserOpSchema,
       userOpHash: agentBytes32HexSchema,
+      /** Null for an action with no market of its own (a cancel, a claim). */
+      market: agentOperationMarketSchema.nullable(),
       summary: boundedString(256).nullable(),
     })
     .strict(),
@@ -276,15 +339,87 @@ export const agentSetTpSlInputSchema = z
 
 export type AgentSetTpSlInput = z.output<typeof agentSetTpSlInputSchema>;
 
+const orderKeyField = z
+  .string()
+  .trim()
+  .transform((value) => value.toLowerCase())
+  .pipe(agentBytes32HexSchema);
+
+/**
+ * `denaria_place_limit_order` (ticket 19, grill Q91): a GMX limit or stop
+ * increase that opens or adds to a position when the price reaches its
+ * trigger, with the open's inputs (collateral × leverage is the size). The
+ * acceptable price is the trigger moved against the order by the slippage, at
+ * most the user's setting. `replacesOrderKey` moves a pending one: a cancel
+ * and a new order in one operation (policy v4 refuses `updateOrder` for an
+ * agent), so the new one passes every cap again. Never dated: GMX's
+ * `validFromTime` is always 0.
+ */
+export const agentPlaceLimitOrderInputSchema = z
+  .object({
+    ...positionFields,
+    side: z.enum(['long', 'short']).describe('The side of the position it opens or adds to.'),
+    orderType: z
+      .enum(['limit', 'stop'])
+      .describe(
+        'limit: a long waits below the current price, a short above it (a better entry). stop: a long waits above it, a short below it (a breakout).',
+      ),
+    collateralUsd: agentUsdcAmountSchema.describe('USDC collateral, e.g. "25".'),
+    leverage: agentLeverageSchema.describe(
+      'Leverage, e.g. 3 or "3". Position size = collateral × leverage.',
+    ),
+    triggerPriceUsd: priceUsd.describe('The trigger price in USD, e.g. "60000".'),
+    slippageBps: slippageField.describe(
+      "How far past the trigger it may fill, in bps, at most the user's setting. Omit it to use the setting.",
+    ),
+    replacesOrderKey: orderKeyField
+      .optional()
+      .describe(
+        'To move a pending limit or stop open of this market and side: its orderKey (denaria_get_open_orders). It is cancelled and the new one placed in the same operation.',
+      ),
+    clientIntentId: clientIntentIdField,
+  })
+  .strict()
+  .superRefine(checkPosition)
+  .transform((value) => ({
+    market: marketOf(value),
+    side: value.side,
+    orderType: value.orderType,
+    collateralUsd: value.collateralUsd,
+    leverage: value.leverage,
+    triggerPriceUsd: value.triggerPriceUsd,
+    ...optional('slippageBps', value.slippageBps),
+    ...optional('replacesOrderKey', value.replacesOrderKey),
+    ...optional('clientIntentId', value.clientIntentId),
+  }));
+
+export type AgentPlaceLimitOrderInput = z.output<typeof agentPlaceLimitOrderInputSchema>;
+
+/**
+ * What a limit or stop order's operation means in each state where it differs
+ * from a market order's (ticket 19): placed, it waits for its price, maybe
+ * long after the conversation; executed, it is a position; cancelled, by the
+ * account or by GMX, its collateral is back. Null where the generic detail holds.
+ */
+export function agentPendingOrderDetail(state: AgentExecutionState): string | null {
+  switch (state) {
+    case 'submitted':
+      return 'On chain, waiting for its price: it opens or adds to the position only when the price reaches its trigger, maybe after this conversation or after the Grant expires. Cancel it with denaria_cancel_order.';
+    case 'executed':
+      return 'The price reached the trigger and the GMX keeper executed the order: it is part of the position now.';
+    case 'cancelled':
+      return 'The order was cancelled before its price was reached (by the account, or by GMX); its collateral is back in the account.';
+    default:
+      return null;
+  }
+}
+
 /** `denaria_cancel_order`: one pending or frozen GMX order of the account. */
 export const agentCancelOrderInputSchema = z
   .object({
-    orderKey: z
-      .string()
-      .trim()
-      .transform((value) => value.toLowerCase())
-      .pipe(agentBytes32HexSchema)
-      .describe('The orderKey from denaria_get_open_orders (or a TP/SL of denaria_get_positions).'),
+    orderKey: orderKeyField.describe(
+      'The orderKey from denaria_get_open_orders (or a TP/SL of denaria_get_positions).',
+    ),
     clientIntentId: clientIntentIdField,
   })
   .strict()
@@ -318,7 +453,7 @@ export const denariaCreatePosition = {
   name: 'denaria_create_position',
   title: 'Open or add to a Denaria position',
   description:
-    "Open (or add to) a GMX market position with USDC collateral, signed by this Signer within the Grant the user approved: no phone. Same input as denaria_prepare_create_position. Refused before anything is sent when it is outside the Grant (market, order size, leverage), when the Grant's window has no operation left, or when slippageBps is above the user's setting (omit it to use the setting). Tell the user the summary, then follow the order with denaria_get_operation_status: submitted is an order on chain, not yet a position.",
+    "Open (or add to) a GMX market position with USDC collateral, signed by this Signer within the Grant the user approved: no phone. Same input as denaria_prepare_create_position. Refused before anything is sent when it is outside the Grant (market, size per operation, leverage), when the Grant's window has no operation left, or when slippageBps is above the user's setting (omit it to use the setting). Tell the user the summary, then follow the order with denaria_get_operation_status: submitted is an order on chain, not yet a position.",
   input: agentPrepareCreatePositionInputSchema,
   output: agentOperationSchema,
   annotations: EXECUTES,
@@ -340,7 +475,7 @@ export const denariaAdjustMargin = {
   name: 'denaria_adjust_margin',
   title: "Add or remove a Denaria position's collateral",
   description:
-    'Add USDC collateral to a GMX position of the account (lower leverage, further liquidation) or remove some (higher leverage), its size unchanged, signed by this Signer within the Grant. Market and side name the position (denaria_get_positions). Adding draws on the free USDC, and on savings only if the user allowed it in the Grant. Refused before anything is sent when it is outside the Grant. Tell the user the summary, then follow it with denaria_get_operation_status.',
+    'Add USDC collateral to a GMX position of the account (lower leverage, further liquidation) or remove some (higher leverage), its size unchanged, signed by this Signer within the Grant. Market and side name the position (denaria_get_positions). Adding draws on the free USDC of the account only, never on savings. Removing needs Margin withdrawal in the Grant (denaria_get_grant): without it, it is refused, and the user turns it on with Renew in the Denaria app. Refused before anything is sent when it is outside the Grant. Tell the user the summary, then follow it with denaria_get_operation_status.',
   input: agentAdjustMarginInputSchema,
   output: agentOperationSchema,
   annotations: EXECUTES,
@@ -356,6 +491,17 @@ export const denariaSetTpSl = {
   output: agentOperationSchema,
   annotations: EXECUTES,
   api: { procedure: 'agentSigner.setTpSl' },
+} as const satisfies AgentAccountToolDefinition;
+
+export const denariaPlaceLimitOrder = {
+  name: 'denaria_place_limit_order',
+  title: 'Place a Denaria limit or stop order to open or add to a position',
+  description:
+    'Place a GMX limit or stop order that opens (or adds to) a position with USDC collateral when the price reaches its trigger, signed by this Signer within the Grant: a limit to enter at a better price than now, a stop to follow a breakout. Use a market order (denaria_create_position) to trade now. Needs the Grant setting "Pending limit and stop orders": without it, it is refused before anything is signed and the user turns it on by renewing the agent in the Denaria app (Renew). The size and leverage caps and the markets of the Grant apply as for denaria_create_position. To move one, send its orderKey as replacesOrderKey: it is cancelled and the new one placed in one operation; to remove one, denaria_cancel_order. Tell the user that it waits for its price and may execute after this conversation, after the Grant expires, or after a revoke unless the revoke cancels it (a revoke in the Denaria app cancels the agent\'s pending limit and stop orders that Denaria finds; tell the user to check Orders afterwards).',
+  input: agentPlaceLimitOrderInputSchema,
+  output: agentOperationSchema,
+  annotations: EXECUTES,
+  api: { procedure: 'agentSigner.placeLimitOrder' },
 } as const satisfies AgentAccountToolDefinition;
 
 export const denariaCancelOrder = {
@@ -403,9 +549,22 @@ export const AGENT_EXECUTION_TOOLS = [
   denariaClosePosition,
   denariaAdjustMargin,
   denariaSetTpSl,
+  denariaPlaceLimitOrder,
   denariaCancelOrder,
   denariaClaimFunding,
 ] as const;
 
 /** Where the Signer sends the signature of the hash a step asked for. */
 export const AGENT_SUBMIT_OPERATION_PROCEDURE = 'agentSigner.submitOperation' as const;
+
+/** Where the Signer says it refused a step and signed nothing (ticket 20):
+ *  the API fails the operation with the reason, and frees the Grant's slot. */
+export const AGENT_ABANDON_OPERATION_PROCEDURE = 'agentSigner.abandonOperation' as const;
+
+export const agentAbandonOperationInputSchema = z
+  .object({
+    reference: agentOperationReferenceSchema,
+    /** What did not match the tool's request, in the Signer's words. */
+    reason: boundedString(400),
+  })
+  .strict();

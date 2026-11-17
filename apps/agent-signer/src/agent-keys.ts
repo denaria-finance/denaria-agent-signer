@@ -1,4 +1,4 @@
-import type { AgentIndex, IndexedKey } from './agent-index.js';
+import type { AgentIndex, IndexedKey, ReuseRequest } from './agent-index.js';
 import { SignerError } from './errors.js';
 import { type KeyStore, newSlot } from './store/types.js';
 
@@ -18,14 +18,17 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
   const { env, store, index } = options;
   // Once per process, the first time an identity is not found: the index may
   // be missing (a new home, a deleted folder) or have unreadable entries. The
-  // listing carries no secret, and says whether the 0.1.0 key exists: deciding
-  // who gets it reads no key (a Keychain that refuses is met only by the
-  // caller that trades with it).
-  let listed: Set<string> | null = null;
+  // listing carries no secret, and says whether the 0.1.0 key exists as 0.1.0
+  // made it: deciding who gets it reads no key (a Keychain that refuses is met
+  // only by the caller that trades with it). A rotated one carries metadata
+  // naming its creator, or no one (Q123), and is never taken unasked.
+  let legacyKey: boolean | null = null;
   const merge = async () => {
     const items = await store.list(env);
     await index.rebuild(items);
-    listed = new Set(items.map((item) => item.slot));
+    legacyKey = items.some(
+      (item) => item.slot === env && item.identity === null && item.createdAt === null,
+    );
     return items;
   };
 
@@ -35,12 +38,12 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
     async resolve(identity: string, claimName: string | null): Promise<string | null> {
       const known = await index.slotOf(identity);
       if (known !== null) return known;
-      if (listed === null) {
+      if (legacyKey === null) {
         await merge();
         const rebuilt = await index.slotOf(identity);
         if (rebuilt !== null) return rebuilt;
       }
-      if (!listed?.has(env)) return null;
+      if (legacyKey !== true) return null;
       if (!(await index.claimLegacy(identity))) return null;
       // The rebuild may have recorded it unnamed (it has no metadata): the
       // claimer names it, until the first Grant read brings Denaria's label.
@@ -62,16 +65,25 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
       return mapped;
     },
 
-    /** Maps `identity` to a key already on this computer. */
-    async reuse(identity: string, slot: string): Promise<string> {
-      const onComputer = await this.onComputer();
-      if (!onComputer.some((key) => key.slot === slot)) {
+    /** A key on this computer, or a refusal that says to choose another. */
+    async find(slot: string): Promise<IndexedKey> {
+      const found = (await this.onComputer()).find((key) => key.slot === slot);
+      if (found === undefined) {
         throw new SignerError(
           `There is no key ${slot.slice(0, 80)} on this computer for ${env}. Call connect again with one of the key ids it lists, or with a name for a new agent.`,
         );
       }
-      return index.map(identity, slot);
+      return found;
     },
+
+    /** Maps `identity` to a key already on this computer, with the request
+     *  that keeps it from signing until the owner approves (ticket 20). */
+    async reuse(identity: string, slot: string, request: ReuseRequest): Promise<string> {
+      await this.find(slot);
+      return index.map(identity, slot, request);
+    },
+
+    reuseOf: (identity: string) => index.reuseOf(identity),
 
     /** The keys the store holds for this Env, with their latest names and
      *  who uses them, oldest first. */

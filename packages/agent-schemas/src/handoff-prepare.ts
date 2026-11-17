@@ -30,7 +30,8 @@ export const agentUsdcAmountSchema = z
       .refine((value) => Number(value) > 0, 'must be greater than 0'),
   );
 
-const leverage = z
+/** A leverage, e.g. 3 or "3": at least 1, two decimals at most. */
+export const agentLeverageSchema = z
   .union([
     z.number(),
     z
@@ -78,7 +79,9 @@ export const agentPrepareCreatePositionInputSchema = z
       .optional()
       .describe('USDC collateral, e.g. "30". Same as collateralUsd; send one of them.'),
     collateralUsd: agentUsdcAmountSchema.optional().describe('USDC collateral, e.g. "25" or 25.5.'),
-    leverage: leverage.describe('Leverage, e.g. 3 or "3". Position size = collateral × leverage.'),
+    leverage: agentLeverageSchema.describe(
+      'Leverage, e.g. 3 or "3". Position size = collateral × leverage.',
+    ),
     slippageBps: slippage
       .optional()
       .describe(

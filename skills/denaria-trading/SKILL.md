@@ -50,13 +50,20 @@ Then call `connect`. The first time, it answers `choose_agent`: every agent on t
 has its own key, so **ask the user** the name of this agent in Denaria, proposing the one
 `connect` gives (`proposedName`, the client's own: "Claude Code", "Codex"), or which key
 already listed to reuse (name, fingerprint, Grant state). Call `connect` again with
-`{"name": "…"}` or `{"reuse": "<key id>"}`. Reusing a key shares that agent's Grant; one
-whose Grant is active trades at once. Never choose for the user. The name is the user's: they
+`{"name": "…"}` or `{"reuse": "<key id>"}`. Reusing a key shares that agent's Grant once the
+user approves it in the Denaria app with their Passkey: `connect` gives the link, and until
+then this agent reads and trades nothing ("the approval is pending"). Never choose for the user. The name is the user's: they
 rename an agent in the app, never through you. Then `connect` answers with
-a link, a QR code and a short fingerprint: show all three. The user opens the link on their phone, checks that the fingerprint is the same,
+a link, a QR code and a short connection code, new with every link: always give the link and
+the connection code. The QR
+comes as an image and as text: if your client shows tool images to the user, say the QR code
+is above; in a terminal, show the text QR in a code block, unchanged; otherwise, or when the
+user cannot see it, call `connect` again with `{"qr": "window"}`, which opens it on this
+computer. The user opens the link on their phone, checks that the connection code is the same,
 chooses the limits and confirms with their Passkey. Call `connect` again: once the Grant is
-live it restates it ("Connected. I can trade BTC and ETH, up to $50 per order, max 3x, until
-11 Nov"). Tell the user those limits in your own words.
+live it restates it ("Connected. I can trade BTC and ETH, up to $50 per operation, max 3x,
+until 11 Nov"). The size is per operation: all the orders of one operation together. Tell the
+user those limits in your own words.
 
 If the user's app has no **Connect an agent**, or Denaria answers that agent trading is not
 open for this account or network, the Signer cannot trade there yet: prepare QR handoffs
@@ -74,13 +81,27 @@ instead.
   user has explicitly delegated a strategy to you and its rules cover the order.
 - **Positions you did not open.** In the Grant's markets GMX merges the user's own position
   with yours, and you can manage every position there. Do not close, resize or change the
-  take profit or stop loss of a position you did not open without asking the user first. If
-  the user wants agent trading kept apart, suggest a dedicated Denaria account for it.
+  take profit or stop loss of a position you did not open without asking the user first, and
+  do not cancel an order you did not place. If the user wants agent trading kept apart,
+  suggest markets where they hold no positions of their own.
 - **Report every operation.** Each execution tool answers with a summary and a `dop_…`
   reference. Tell the user the summary, then follow the reference with
   `denaria_get_operation_status` until it is `executed`, `cancelled` or `failed`, and say what
   happened. A market order is not a position until it is executed; a limit, take profit or
   stop loss waits for its price.
+- **Limit and stop orders.** `denaria_place_limit_order` opens or adds to a position only
+  when the price reaches a trigger: `limit` for a better entry than now (a long below the
+  price, a short above it), `stop` to follow a breakout (a long above the price, a short
+  below it). Use a market order (`denaria_create_position`) to trade now. It needs the
+  Grant setting **Pending limit and stop orders**: without it the tool refuses before
+  anything is signed, and the user turns it on by renewing you in the app (Renew). Before
+  placing one, tell the user that it waits for its price and may execute after this
+  conversation, after the Grant expires, or after a revoke unless the revoke cancels it (a
+  revoke in the app cancels your pending limit and stop orders that Denaria finds; tell the
+  user to check Orders afterwards). To move one, send its `orderKey` as `replacesOrderKey`:
+  it is cancelled and the new one placed in one operation, within the same limits. To remove one, `denaria_cancel_order`. Its operation
+  stays `submitted` ("waiting for its price") until GMX executes it (`executed`) or it is
+  cancelled (`cancelled`); `denaria_get_open_orders` lists it with its trigger.
 - **Refusals are information.** Read the message and the next step it gives, and tell the
   user. Never split or reshape an order to get past a limit. Outside the Grant: the user
   renews it with new limits in the app. Not enough USDC: the user moves funds. An operation
@@ -88,10 +109,15 @@ instead.
   only closing is allowed, or nothing.
 - **Expiry.** Every answer carries the Grant's expiry. Warn the user a day before. After it,
   open positions keep their GMX take profit and stop loss, and you cannot touch them until the
-  user renews (one tap on the phone, same key).
+  user renews (one tap on the phone, same key). Your pending limit and stop orders also stay on
+  GMX after the expiry and can still open or grow a position: say so, and that the renewal
+  screen offers to cancel them.
 - **What you can never do.** Withdraw, send funds, or touch the account's security: the
   Grant does not allow it. The user can revoke you at any time in **Settings → Access &
-  security → Agents**.
+  security → Agents**. A revoke ends your key once it lands on-chain and, in the same
+  confirmation, cancels the pending limit and stop orders of yours that Denaria finds; tell the
+  user to check Orders afterwards. The take profit and stop loss you placed stay on the
+  positions unless the user chooses to cancel them too.
 
 ## Trading through the QR (no Signer)
 

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { SignerError } from '../errors.js';
+import { claimKeyringRotation, rotationClaimTime } from './rotation.js';
 import { runTool, type ToolResult } from './run-tool.js';
 import {
   assertPlainSlot,
@@ -27,6 +28,10 @@ import {
  * `-U`, which fails when it exists: two Signers never take the same number.
  * The entry is made before the key: a key is never saved unlisted, and an
  * entry whose key was never saved lists nothing (a retry in the slot reuses it).
+ *
+ * A rotation is claimed before the item is updated, with an empty file
+ * `<home>/<slot>.keychain.replaced-<fingerprint of the old key>` (Q125,
+ * rotation.ts): of two Signers that found one key revoked, one replaces it.
  */
 
 export const KEYCHAIN_SERVICE = 'denaria-agent-signer';
@@ -61,7 +66,7 @@ const metaSchema = z.object({
   env: z.string(),
   slot: z.string(),
   name: z.string().nullable(),
-  identity: z.string(),
+  identity: z.string().nullable(),
   createdAt: z.string(),
 });
 
@@ -87,6 +92,8 @@ function attributeOf(stdout: string, name: string): string | null {
 
 export function keychainKeyStore(options: {
   run: SecurityRunner;
+  /** The Signer's home, where a rotation is claimed (rotation.ts). */
+  home: string;
   service?: string;
   /** A keychain file instead of the default one (the live test's throwaway). */
   keychain?: string;
@@ -187,10 +194,21 @@ export function keychainKeyStore(options: {
       await enter(slot, meta);
       await add(slot, secret, meta, false);
     },
-    // `-U` updates the item in place: the Keychain keeps no old version, and
-    // the old key's Grant is revoked anyway when the Signer rotates. The slot
-    // keeps its directory entry (the 0.1.0 one has none and needs none).
-    replace: (slot, secret, meta) => add(slot, secret, meta, true),
+    // The rotation is claimed in the Signer's home first (Q125): the Keychain
+    // has no add that fails unless the item still holds a given secret.
+    // `-U` then updates the item in place: the Keychain keeps no old version,
+    // and the old key's Grant is revoked anyway when the Signer rotates. The
+    // slot keeps its directory entry (the 0.1.0 one has none and needs none).
+    rotationClaimedAt(slot, claim) {
+      return rotationClaimTime(options.home, `${slot}.keychain`, claim);
+    },
+
+    async replace(slot, claim, secret, meta) {
+      assertSavable(slot, secret);
+      if (!(await claimKeyringRotation(options.home, `${slot}.keychain`, claim))) return false;
+      await add(slot, secret, meta, true);
+      return true;
+    },
 
     async list(env) {
       assertPlainSlot(env);

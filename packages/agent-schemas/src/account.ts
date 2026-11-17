@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_REUSE_REFERENCE } from './connect-link.js';
 import { agentNetworkSchema } from './network.js';
 import {
   boundedString,
@@ -50,13 +51,20 @@ export const agentGrantLimitsSchema = z
       z.literal('any'),
       z.array(agentGrantMarketSchema).min(1).max(AGENT_GRANT_MAX_MARKETS),
     ]),
-    /** Largest size of one order, in whole USD. */
+    /** Largest size of one operation, in whole USD: the increase orders of
+     *  one operation together (policy v4). */
     maxOrderUsd: z.number().int().positive(),
     /** Largest leverage of a position, e.g. 3 for 3x. */
     maxLeverage: z.number().positive(),
     /** At most this many operations in any window of `windowSeconds`. */
     maxOperationsPerWindow: z.number().int().positive(),
     windowSeconds: z.number().int().positive(),
+    /** Policy v4's "Pending limit and stop orders" (ADR-0063 §3): limit and stop
+     *  opens and dated orders. Off by default. */
+    pendingIncreaseOrdersAllowed: z.boolean(),
+    /** Policy v4's "Margin withdrawal" (ADR-0063 §3): Remove margin, and a
+     *  close that takes collateral out. Off by default. */
+    marginWithdrawalAllowed: z.boolean(),
   })
   .strict();
 
@@ -79,6 +87,24 @@ export const agentGrantSchema = z
   })
   .strict();
 
+/** Where a Signer asks whether its reuse request was approved (ticket 20,
+ *  Q102; review round 1 A2): under the key's login, by the request's
+ *  reference. */
+export const AGENT_REUSE_APPROVAL_PROCEDURE = 'agentSigner.reuseApproval' as const;
+
+export const agentReuseReferenceSchema = z.string().regex(AGENT_REUSE_REFERENCE);
+
+export const agentReuseApprovalInputSchema = z
+  .object({ reference: agentReuseReferenceSchema })
+  .strict();
+
+/** `approved`: a Grant of this key enrolled with the reference was installed
+ *  with the owner's Passkey, now or before (a later renewal keeps it). */
+export const agentReuseApprovalSchema = z
+  .object({ network: agentNetworkSchema, approved: z.boolean() })
+  .strict();
+
+export type AgentReuseApproval = z.infer<typeof agentReuseApprovalSchema>;
 export type AgentGrantStamp = z.infer<typeof agentGrantStampSchema>;
 export type AgentGrantLimits = z.infer<typeof agentGrantLimitsSchema>;
 export type AgentGrant = z.infer<typeof agentGrantSchema>;

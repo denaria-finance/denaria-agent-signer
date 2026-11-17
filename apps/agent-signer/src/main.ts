@@ -3,6 +3,7 @@ import { fileAgentIndex } from './agent-index.js';
 import { createSignerApi } from './api.js';
 import { parseCliArgs, type StoreKind, USAGE } from './cli.js';
 import { apiBaseUrlOf, SIGNER_TARGETS, SIGNER_VERSION } from './envs.js';
+import { qrWindow, systemQrOpener } from './qr-window.js';
 import { createSignerServer } from './server.js';
 import { fileKeyStore, PASSPHRASE_VARIABLE } from './store/file.js';
 import { signerHome, systemKeyStore } from './store/system.js';
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
     api: createSignerApi({ baseUrl: apiBaseUrl }),
     log,
     name: command.name,
+    qrWindow: qrWindow({ home: signerHome(), open: systemQrOpener(process.platform) }),
   });
   await server.connect(new StdioServerTransport());
   log(
