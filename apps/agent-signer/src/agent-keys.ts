@@ -1,6 +1,6 @@
 import type { AgentIndex, IndexedKey, ReuseRequest } from './agent-index.js';
 import { SignerError } from './errors.js';
-import { type KeyStore, newSlot } from './store/types.js';
+import { type KeyItem, type KeyStore, newSlot } from './store/types.js';
 
 /**
  * Which key a caller trades with (ADR-0062 §18, ticket 15): the index says
@@ -16,42 +16,57 @@ import { type KeyStore, newSlot } from './store/types.js';
  */
 export function agentKeys(options: { env: string; store: KeyStore; index: AgentIndex }) {
   const { env, store, index } = options;
-  // Once per process, the first time an identity is not found: the index may
-  // be missing (a new home, a deleted folder) or have unreadable entries. The
-  // listing carries no secret, and says whether the 0.1.0 key exists as 0.1.0
-  // made it: deciding who gets it reads no key (a Keychain that refuses is met
-  // only by the caller that trades with it). A rotated one carries metadata
-  // naming its creator, or no one (Q123), and is never taken unasked.
-  let legacyKey: boolean | null = null;
+  // Every time an identity is not found (multi-strategy agents: nothing holds
+  // a caller's agents for the life of the process, so a deleted folder heals
+  // at the next call): the index may be missing (a new home, a deleted folder)
+  // or have unreadable entries. The listing carries no secret, and says
+  // whether the 0.1.0 key exists as 0.1.0 made it: deciding who gets it reads
+  // no key (a Keychain that refuses is met only by the caller that trades with
+  // it). A rotated one carries metadata naming its creator, or no one (Q123),
+  // and is never taken unasked.
   const merge = async () => {
     const items = await store.list(env);
     await index.rebuild(items);
-    legacyKey = items.some(
-      (item) => item.slot === env && item.identity === null && item.createdAt === null,
-    );
     return items;
   };
+  const isLegacyKey = (item: KeyItem) =>
+    item.slot === env && item.identity === null && item.createdAt === null;
+
+  /** The slots of `identity`'s agents, its first agent first, claiming the
+   *  0.1.0 key when it is free (`claimed`: by this call); empty when the
+   *  caller must choose at connect. Read from the index on every call. */
+  const agentsAndClaim = async (
+    identity: string,
+    claimName: string | null,
+  ): Promise<{ slots: string[]; claimed: boolean }> => {
+    const none = { slots: [], claimed: false };
+    const known = await index.slotsOf(identity);
+    if (known.length > 0) return { slots: known, claimed: false };
+    const items = await merge();
+    const rebuilt = await index.slotsOf(identity);
+    if (rebuilt.length > 0) return { slots: rebuilt, claimed: false };
+    if (!items.some(isLegacyKey)) return none;
+    if (!(await index.claimLegacy(identity))) return none;
+    // The rebuild may have recorded it unnamed (it has no metadata): the
+    // claimer names it, until the first Grant read brings Denaria's label.
+    await index.addKey({ slot: env, name: claimName, createdAt: null });
+    if (claimName !== null && (await index.nameOf(env)) === null) {
+      await index.rename(env, claimName);
+    }
+    return { slots: [await index.map(identity, env)], claimed: true };
+  };
+
+  const agentsOf = async (identity: string, claimName: string | null): Promise<string[]> =>
+    (await agentsAndClaim(identity, claimName)).slots;
 
   return {
-    /** The slot `identity` uses, claiming the 0.1.0 key when it is free;
-     *  null when the caller must choose at connect. */
+    agentsOf,
+    agentsAndClaim,
+
+    /** The slot of `identity`'s first agent, claiming the 0.1.0 key when it
+     *  is free; null when the caller must choose at connect. */
     async resolve(identity: string, claimName: string | null): Promise<string | null> {
-      const known = await index.slotOf(identity);
-      if (known !== null) return known;
-      if (legacyKey === null) {
-        await merge();
-        const rebuilt = await index.slotOf(identity);
-        if (rebuilt !== null) return rebuilt;
-      }
-      if (legacyKey !== true) return null;
-      if (!(await index.claimLegacy(identity))) return null;
-      // The rebuild may have recorded it unnamed (it has no metadata): the
-      // claimer names it, until the first Grant read brings Denaria's label.
-      await index.addKey({ slot: env, name: claimName, createdAt: null });
-      if (claimName !== null && (await index.nameOf(env)) === null) {
-        await index.rename(env, claimName);
-      }
-      return index.map(identity, env);
+      return (await agentsOf(identity, claimName))[0] ?? null;
     },
 
     /** A new slot for `identity` with this Agent name, in the index before the
@@ -63,6 +78,54 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
       const mapped = await index.map(identity, slot);
       if (mapped !== slot) await index.removeKey(slot);
       return mapped;
+    },
+
+    /**
+     * One more agent of `identity` (multi-strategy agents, ticket 02): a new
+     * slot with this Agent name, added to the caller's agents before its key
+     * exists (the key is made by the caller). The name is claimed first
+     * (`AgentIndex.claimName`), with the caller's agents that have it now
+     * (`observed`, none of them live): null when another Signer of this
+     * caller holds the claim, so two Signers never both make the name.
+     */
+    async addAgent(
+      identity: string,
+      name: string,
+      observed: readonly string[],
+      createdAt: string,
+    ): Promise<string | null> {
+      const slot = newSlot(env);
+      const claim = { identity, name, observed, slot, claimedAt: createdAt };
+      if (!(await index.claimName(claim))) return null;
+      await index.addKey({ slot, name, createdAt });
+      await index.add(identity, slot);
+      return slot;
+    },
+
+    /** The keys of `slots` with their latest names (the creation name in the
+     *  store item when the index has none), oldest first. */
+    async described(
+      slots: readonly string[],
+    ): Promise<Array<{ slot: string; name: string | null; createdAt: string | null }>> {
+      const indexed = new Map((await index.keys()).map((key) => [key.slot, key]));
+      let items: readonly KeyItem[] | null = null;
+      const described = [];
+      for (const slot of slots) {
+        const key = indexed.get(slot);
+        let name = key?.name ?? null;
+        let createdAt = key?.createdAt ?? null;
+        if (name === null || key === undefined) {
+          items ??= await store.list(env).catch(() => []);
+          const item = items.find((candidate) => candidate.slot === slot);
+          name ??= item?.name ?? null;
+          createdAt ??= item?.createdAt ?? null;
+        }
+        described.push({ slot, name, createdAt });
+      }
+      return described.sort(
+        (a, b) =>
+          (a.createdAt ?? '').localeCompare(b.createdAt ?? '') || a.slot.localeCompare(b.slot),
+      );
     },
 
     /** A key on this computer, or a refusal that says to choose another. */
@@ -83,7 +146,18 @@ export function agentKeys(options: { env: string; store: KeyStore; index: AgentI
       return index.map(identity, slot, request);
     },
 
-    reuseOf: (identity: string) => index.reuseOf(identity),
+    /** Adds a key already on this computer to the agents of `identity`, which
+     *  has agents already (multi-strategy agents, ticket 04, Q211), with the
+     *  request on that agent's own entry. Another Signer of the caller may
+     *  have added it first: its entry, and its request, hold. */
+    async reuseAsAgent(identity: string, slot: string, request: ReuseRequest): Promise<void> {
+      await this.find(slot);
+      await index.add(identity, slot, request);
+    },
+
+    /** The reuse request on the entry of `identity` for `slot` (no slot: its
+     *  first agent's), or null. */
+    reuseOf: (identity: string, slot?: string) => index.reuseOf(identity, slot),
 
     /** The keys the store holds for this Env, with their latest names and
      *  who uses them, oldest first. */

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   AGENT_ABANDON_OPERATION_PROCEDURE,
+  AGENT_ACCOUNT_READ_WITH_LABEL,
   AGENT_ACCOUNT_TOOLS,
   AGENT_EXECUTION_TOOLS,
   AGENT_LABEL_MAX_LENGTH,
@@ -37,7 +38,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import type { AgentIndex, ReuseRequest } from './agent-index.js';
+import { type AgentIndex, nameKey, type ReuseRequest } from './agent-index.js';
 import { agentKeys } from './agent-keys.js';
 import { ApiRefusal, ApiUnreachable, type SignerApi } from './api.js';
 import { agentNameSchema, clientIdentity, labelFromClient } from './client-label.js';
@@ -54,7 +55,7 @@ import {
 import { qrPng } from './qr-image.js';
 import type { QrWindow } from './qr-window.js';
 import { createAgentSession } from './session.js';
-import { SessionKey } from './session-key.js';
+import { publicKeyRefOf, SessionKey } from './session-key.js';
 import { MAX_ROTATION_ATTEMPTS } from './store/rotation.js';
 import type { KeyItemMeta, KeyStore } from './store/types.js';
 import { terminalQr } from './terminal-qr.js';
@@ -99,6 +100,7 @@ const connectDescription = (pwaOrigin: string) =>
     'The user opens the link on their phone, checks that the phone shows the same connection code, chooses the limits and confirms with their Passkey; then call connect again.',
     'Once connected, it says what this agent may trade, up to which size and leverage, and until when, with no new link.',
     'If the Grant was revoked, it makes a new key and a new link.',
+    'One client can have several agents, each with its own key, Grant and Account: connect with a new name makes one more. With two or more, connect needs agent (the key id or Agent name of the one to check), and so does every Denaria tool.',
     QR_CHOICE,
     'The private key never leaves this computer and is never part of the answer.',
     `If the Signer does not start or keeps failing, the user follows the Denaria setup guide: ${guideLinks(pwaOrigin)}.`,
@@ -113,6 +115,12 @@ function instructions(network: AgentNetwork, pwaOrigin: string): string {
     QR_CHOICE,
     "The first connect of this agent asks for its name: ask the user, proposing the name connect gives, or which key already on this computer to reuse, and call connect again with the user's choice.",
     'Reusing a key asks the user to approve this agent in the Denaria app with their Passkey; until then this agent reads and trades nothing.',
+    // Several strategies (multi-strategy agents, ticket 06, Q208): the normal
+    // path, the same in every client; --name is for the README only.
+    'When the user starts a new strategy, propose a dedicated Denaria agent on a new Account, then call connect with {"name": "<Agent name>"}; tell the user to choose "New account" on the phone (it may be already selected), where they can also set an initial capital.',
+    "Write the Agent name and the key id in the strategy's notes, and read them when the user picks the strategy up again.",
+    `Once this client has two or more agents, pass agent on every call, preferably the key id (${agentToolName({ name: 'denaria_list_agents' }, network)} lists them). When a call is refused with the list of agents, ask the user which one, never pick one.`,
+    'Another client (Claude Code, Codex) uses an existing strategy with connect {"reuse": "<key id>"}, the key id from its notes, once the user approves it with their Passkey.',
     'Once connected, the account tools read the Grant, the positions, the open orders and the USDC of the account. Every answer states the network and when the Grant expires: tell the user before it does.',
     // Prudence (agent-trading Stage 2 Q69, ADR-0062 §17): the core of the
     // denaria-trading skill, for an agent that does not have it.
@@ -127,18 +135,27 @@ function instructions(network: AgentNetwork, pwaOrigin: string): string {
   ].join(' ');
 }
 
+/** The `agent` connect, every account tool and every trade take
+ *  (multi-strategy agents): a key id, or an Agent name. */
+const agentInputSchema = z.string().trim().min(1).max(80);
+
 const connectInput = z.object({
   name: agentNameSchema
     .optional()
     .describe(
-      'The Agent name the user chose for a new agent on this computer, after connect answered choose_agent. The user sees it in Denaria; it is renamed there, in the app.',
+      'The Agent name the user chose for a new agent of this client: at its first connect, after connect answered choose_agent, or later for one more agent, with its own key, Grant and Account (a new strategy). When an agent of this client whose Grant is not revoked already has that name (trimmed, any case), no agent is made: connect answers about that one, or, when two have it, refuses with the list. The user sees it in Denaria; it is renamed there, in the app. A Signer started with --name has one agent and takes no other name.',
+    ),
+  agent: agentInputSchema
+    .optional()
+    .describe(
+      'Which agent of this client to check or link: its key id, or its Agent name (trimmed, any case, the latest name the user gave it in Denaria). Needed once this client has two or more agents; with one, it may be omitted.',
     ),
   reuse: z
     .string()
     .max(80)
     .optional()
     .describe(
-      'The key id of a key already on this computer the user chose to reuse, from the list connect gave with choose_agent. The user then approves this agent in the Denaria app with their Passkey.',
+      "The key id of a key already on this computer the user chose to reuse: from the list connect gave with choose_agent, or, for a client that has agents already, another client's agent (a strategy's notes give its key id), added as one more agent of this client. The user then approves it in the Denaria app with their Passkey; until then that agent reads and trades nothing, and this client's other agents go on. Refused by a Signer started with --name.",
     ),
   qr: z
     .enum(['window'])
@@ -205,6 +222,107 @@ const connectOutput = z.object({
 });
 
 type ConnectOutput = z.infer<typeof connectOutput>;
+
+/** Which agent an account answer or an operation is about: its key id, its
+ *  Agent name, the Account its Grant is on and that Account's label (`Main`
+ *  for the Main account, else its Account title), each null when not known:
+ *  an API from before the label does not give it (ticket 05). */
+const agentRefSchema = z
+  .object({
+    keyId: z.string(),
+    name: z.string().nullable(),
+    account: z.string().nullable(),
+    accountLabel: z.string().nullable(),
+  })
+  .strict();
+type AgentRef = z.infer<typeof agentRefSchema>;
+
+const agentRowGrants = [
+  'active',
+  'expired',
+  'revoked',
+  'not_confirmed',
+  'approval_pending',
+  'unknown',
+] as const;
+type AgentRowGrant = (typeof agentRowGrants)[number];
+
+/** One agent of the caller, as the list tool and the refusals give it. */
+const agentRowSchema = z
+  .object({
+    name: z.string().nullable(),
+    keyId: z.string(),
+    fingerprint: z.string().nullable(),
+    /** The Account its Grant is on; null when not known. */
+    account: z.string().nullable(),
+    /** That Account's label, `Main` for the Main account; null when not known. */
+    accountLabel: z.string().nullable(),
+    grant: z.enum(agentRowGrants),
+    /** When the Grant expires, for an active one. */
+    expiresAt: z.string().nullable(),
+  })
+  .strict();
+type AgentRow = z.infer<typeof agentRowSchema>;
+
+const listAgentsOutput = z
+  .object({ network: agentNetworkSchema, agents: z.array(agentRowSchema) })
+  .strict();
+
+const ROW_WORDS: Record<AgentRowGrant, string> = {
+  active: 'Grant active',
+  expired: 'Grant expired',
+  revoked: 'Grant revoked',
+  not_confirmed: 'not confirmed on the phone yet',
+  approval_pending: 'its reuse waits for the owner to approve it with the Passkey',
+  unknown: 'Grant state unknown (it could not be read now)',
+};
+
+function rowLine(row: AgentRow): string {
+  const until =
+    row.grant === 'active' && row.expiresAt !== null ? ` until ${shortInstant(row.expiresAt)}` : '';
+  const fingerprint = row.fingerprint === null ? '' : `, fingerprint ${row.fingerprint}`;
+  return `- ${row.name === null ? 'unnamed' : `"${row.name}"`} (key id ${row.keyId}${fingerprint}): account ${row.account === null ? 'unknown' : accountWords(row.account, row.accountLabel)}, ${ROW_WORDS[row.grant]}${until}.`;
+}
+
+const agentsText = (rows: readonly AgentRow[]) =>
+  ['The agents of this client on this computer, oldest first:', ...rows.map(rowLine)].join('\n');
+
+/** `"Gamble" (0x…)` with the Account's label, else the address alone. */
+const accountWords = (account: string, label: string | null) =>
+  label === null ? account : `"${label}" (${account})`;
+
+/** "Agent: "Gamble" (key id …), account "Gamble" (0x…)." */
+function agentLine(ref: AgentRef): string {
+  const who = ref.name === null ? `key id ${ref.keyId}` : `"${ref.name}" (key id ${ref.keyId})`;
+  return `Agent: ${who}${ref.account === null ? '' : `, account ${accountWords(ref.account, ref.accountLabel)}`}.`;
+}
+
+/** What this process knows of a key's Account: its address, and its label
+ *  when the API gave one (ticket 05). */
+type KnownAccount = { account: string; label: string | null };
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are refused or stripped
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+/** The Account an answer names. The label reaches the agent's text, so one
+ *  with control characters is not shown: the address is enough. */
+type AccountNamed = { account: string; accountLabel?: string | undefined };
+function knownAccountOf(answer: AccountNamed): KnownAccount {
+  const label = answer.accountLabel;
+  return {
+    account: answer.account,
+    label: label === undefined || CONTROL_CHARACTER.test(label) ? null : label,
+  };
+}
+
+/** Whether an agent's Agent name is `given`, both trimmed and in any case. */
+const sameAgentName = (name: string | null, given: string) =>
+  name !== null && nameKey(name) === nameKey(given);
+
+// The same pattern, global, for `replace` only (`test` on a global regex
+// moves its lastIndex).
+const CONTROL_CHARACTERS = new RegExp(CONTROL_CHARACTER.source, 'g');
+/** What the agent gave, quoted for an answer. */
+const quoted = (given: string) => JSON.stringify(given.replace(CONTROL_CHARACTERS, ''));
 type QrMode = z.infer<typeof connectInput>['qr'];
 
 const joinLeads = (...leads: Array<string | null>): string | null => {
@@ -279,8 +397,11 @@ function connectText(options: {
   qr: QrShown;
   /** `renew`: the owner approves a reused key by renewing its Grant. */
   approval: 'connect' | 'renew';
+  /** The key id to name when calling connect again: given when the caller
+   *  has several agents. */
+  again: string | null;
 }): string {
-  const { network, link, code, name, where, lead, qr, approval } = options;
+  const { network, link, code, name, where, lead, qr, approval, again } = options;
   const renew = approval === 'renew';
   return [
     network.notice,
@@ -310,7 +431,7 @@ function connectText(options: {
       : '3. Choose the limits.',
     renew ? '4. Renew with your Passkey.' : '4. Confirm with your Passkey.',
     '',
-    `After you ${renew ? 'approve' : 'confirm'} on your phone, call connect again: it checks the Grant and says what this agent may do.`,
+    `After you ${renew ? 'approve' : 'confirm'} on your phone, call connect again${again === null ? '' : ` with {"agent": "${again}"}`}: it checks the Grant and says what this agent may do.`,
     '',
     `The private key stays on this computer, in ${where}. Denaria never sees it.`,
   ].join('\n');
@@ -428,36 +549,59 @@ export function createSignerServer(options: {
   const identityOf = () =>
     commandName !== null ? `name:${commandName}` : `client:${clientIdentity(clientName())}`;
 
-  // The slot this process's caller uses, once known: a mapping is never
-  // changed once made, so it holds for the life of the process.
-  let resolved: string | null = null;
-  const slotOf = async (inputName?: string): Promise<string | null> => {
-    if (resolved === null) {
-      resolved = await keys.resolve(
-        identityOf(),
-        commandName ?? inputName ?? labelFromClient(clientName()),
-      );
-    }
-    return resolved;
+  /**
+   * The caller's agents (multi-strategy agents), read from the index on
+   * every call, never held for the life of the process, since other Signers
+   * of this caller may add agents: none when the caller must choose at
+   * connect. `inputName` names the 0.1.0 key when this call claims it
+   * (`claimed`). A Signer started with `--name` has one agent, its first
+   * (ticket 03, Q207): it knows no other, whatever the index holds.
+   */
+  const theAgents = async (inputName?: string) => {
+    const found = await keys.agentsAndClaim(
+      identityOf(),
+      commandName ?? inputName ?? labelFromClient(clientName()),
+    );
+    return commandName === null ? found : { ...found, slots: found.slots.slice(0, 1) };
   };
 
-  // The reuse request of this process's caller (ticket 20, Q102), read once:
-  // a mapping never changes. Approved once Denaria says a Grant of the key
-  // enrolled with the request's reference was installed (review round 1 A2):
-  // the owner opened this caller's link and approved it with the Passkey.
-  // Another renewal of the key (the expiry push, Agents) approves no caller.
-  // The approval holds for the key it was given for (ticket 25, Q109): the
-  // slot is read on every call, and a key another process put there after a
-  // revoke is pending again, as after a restart.
-  let reuseGate:
-    | { request: ReuseRequest; approvedFor: SessionKey['publicKey'] | null }
-    | null
-    | undefined;
-  /** The reuse still to approve for `key` (null: a key not loaded yet). */
-  const pendingReuse = async (key: SessionKey | null) => {
+  const listAgentsName = agentToolName({ name: 'denaria_list_agents' }, network);
+  // What this process learnt of each key, in memory only: the Account its
+  // Grant is on (a key's Grant stays on one Account) with its label as last
+  // read (every account read refreshes it, so a rename in the app shows from
+  // the next one), and that its Grant was revoked (a revoked key never gets a
+  // Grant again: the list does not sign in with it).
+  const accounts = new Map<string, KnownAccount>();
+  const learnAccount = (key: SessionKey, answer: AccountNamed) => {
+    const known = knownAccountOf(answer);
+    accounts.set(publicKeyRefOf(key), known);
+    return known;
+  };
+  // Every account read asks for the Account's label: an API from before it
+  // ignores the ask (ticket 05).
+  const accountRead = (key: SessionKey, procedure: string) =>
+    session.read(key, procedure, AGENT_ACCOUNT_READ_WITH_LABEL);
+  const revokedKeys = new Set<string>();
+
+  // The reuse request of each of this caller's agents (ticket 20, Q102), read
+  // once per slot: the entry of an identity for a slot never changes.
+  // Approved once Denaria says a Grant of the key enrolled with the request's
+  // reference was installed (review round 1 A2): the owner opened this
+  // caller's link and approved it with the Passkey. Another renewal of the key
+  // (the expiry push, Agents) approves no caller. The approval holds for the
+  // key it was given for (ticket 25, Q109): the slot is read on every call,
+  // and a key another process put there after a revoke is pending again, as
+  // after a restart.
+  type ReuseGate = { request: ReuseRequest; approvedFor: SessionKey['publicKey'] | null };
+  const reuseGates = new Map<string, ReuseGate | null>();
+  /** The reuse of the agent in `slot` still to approve for `key` (null: a
+   *  key not loaded yet). */
+  const pendingReuse = async (slot: string, key: SessionKey | null) => {
+    let reuseGate = reuseGates.get(slot);
     if (reuseGate === undefined) {
-      const request = await keys.reuseOf(identityOf());
+      const request = await keys.reuseOf(identityOf(), slot);
       reuseGate = request === null ? null : { request, approvedFor: null };
+      reuseGates.set(slot, reuseGate);
     }
     if (reuseGate === null) return null;
     const approved = reuseGate.approvedFor;
@@ -483,8 +627,17 @@ export function createSignerServer(options: {
     const name = await keys.nameOf(slot);
     return name === null ? `key ${slot}` : `key of "${name}" (key id ${slot})`;
   };
+  /** A caller whose reuse of a key is not approved yet. */
+  class ReusePending extends SignerError {}
+
+  /** With several agents, only the one whose reuse waits is held up
+   *  (ticket 04). */
+  const othersGoOn = async () =>
+    (await theAgents()).slots.length > 1
+      ? " This client's other agents are not held up: they go on reading and trading."
+      : '';
   const pendingLead = async (slot: string) =>
-    `This agent asked to reuse the ${await keyWords(slot)}, which another agent on this computer made. The approval is pending: the owner approves this agent in the Denaria app with their Passkey, and until then it reads and trades nothing. The agents already using the key go on as before.`;
+    `This agent asked to reuse the ${await keyWords(slot)}, which another agent on this computer made. The approval is pending: the owner approves this agent in the Denaria app with their Passkey, and until then it reads and trades nothing. The agents already using the key go on as before.${await othersGoOn()}`;
 
   // One connect at a time: two calls must not both find no key and make two.
   let queue: Promise<unknown> = Promise.resolve();
@@ -614,8 +767,137 @@ export function createSignerServer(options: {
     );
   };
 
-  const stored = async (): Promise<{ slot: string; key: SessionKey }> => {
-    const slot = await slotOf();
+  /** The agent `given` names among the caller's agents (multi-strategy
+   *  agents, Q209, Q210): its key id exactly, else its Agent name, trimmed and
+   *  in any case, against the latest name Denaria gave each, matching one.
+   *  With one agent `given` may be missing; with several it may not. Refused
+   *  with the list, before anything of the call is sent. */
+  const resolveAgent = async (given: string | undefined, slots: string[]): Promise<string> => {
+    if (commandName !== null) return resolvePinned(given, slots);
+    if (given === undefined) {
+      const [only] = slots;
+      if (slots.length === 1 && only !== undefined) return only;
+      throw await choiceRefusal(
+        `This client has ${slots.length} Denaria agents, so the call must say which one acts, with agent: its key id or its Agent name. Nothing was sent. Ask the user which agent this is for (never pick one), then call again with {"agent": "<key id>"}.`,
+      );
+    }
+    if (slots.includes(given)) return given;
+    const named = (await keys.described(slots)).filter((agent) => sameAgentName(agent.name, given));
+    const [match] = named;
+    if (named.length === 1 && match !== undefined) return match.slot;
+    throw await choiceRefusal(
+      named.length === 0
+        ? `No agent of this client has the key id or the Agent name ${quoted(given)}. Nothing was sent. Ask the user which agent this is for, then call again with its key id in agent.`
+        : `${named.length} agents of this client have the Agent name ${quoted(given)}. Nothing was sent. Ask the user which one this is for, then call again with its key id in agent.`,
+    );
+  };
+
+  /** A refusal of a Signer started with `--name` (ticket 03, Q207): it acts
+   *  for that one agent and for no other, so a session wired to it cannot
+   *  reach another strategy. It reads nothing from Denaria. */
+  const pinnedRefusal = (why: string, slot: string | undefined): SignerError =>
+    new SignerError(
+      `This Denaria Agent Signer was started for one agent, ${quoted(commandName ?? '')}${slot === undefined ? '' : ` (key id ${slot})`}, and acts for no other: ${why} Another agent acts through the Agent signer started for it (with its own --name), or through one started without --name. Ask the user which agent this is for, and never act as another.`,
+    );
+
+  /** Whether `given` names the agent of a `--name` Signer: its key id, its
+   *  Agent name (the latest Denaria gave it) or the `--name` itself, the
+   *  names trimmed and in any case. */
+  const namesPinned = async (given: string, slot: string | undefined): Promise<boolean> => {
+    if (commandName !== null && nameKey(given) === nameKey(commandName)) return true;
+    if (slot === undefined) return false;
+    if (given === slot) return true;
+    const name = (await keys.described([slot]))[0]?.name ?? null;
+    return sameAgentName(name, given);
+  };
+
+  const resolvePinned = async (given: string | undefined, slots: string[]): Promise<string> => {
+    const [only] = slots;
+    if (only === undefined) {
+      throw new SignerError(
+        'This agent is not connected to Denaria yet: call connect first, then confirm on the phone.',
+      );
+    }
+    if (given === undefined || (await namesPinned(given, only))) return only;
+    throw pinnedRefusal(`${quoted(given)} is not that agent. Nothing was sent.`, only);
+  };
+
+  /** Where an agent stands, for the list: the Grant is read only for an
+   *  agent whose Grant may be live (not one this process saw revoked, not a
+   *  reuse waiting for its approval), and a read that fails says unknown. */
+  const rowOf = async (agent: { slot: string; name: string | null }): Promise<AgentRow> => {
+    const { slot } = agent;
+    let key: SessionKey | null = null;
+    try {
+      const secret = await store.load(slot);
+      key = secret === null ? null : SessionKey.fromSecret(secret);
+    } catch {
+      key = null;
+    }
+    const base = { keyId: slot, name: agent.name, expiresAt: null };
+    if (key === null) {
+      return { ...base, fingerprint: null, account: null, accountLabel: null, grant: 'unknown' };
+    }
+    const id = publicKeyRefOf(key);
+    const cached = accounts.get(id);
+    const known = {
+      ...base,
+      fingerprint: await agentKeyFingerprint(key.publicKey),
+      account: cached?.account ?? null,
+      accountLabel: cached?.label ?? null,
+    };
+    if (revokedKeys.has(id)) return { ...known, grant: 'revoked' };
+    try {
+      await admitReuse(slot, key);
+      const answer = await grantRead(slot, key);
+      const read = knownAccountOf(answer);
+      return {
+        ...known,
+        name: (await keys.nameOf(slot)) ?? agent.name,
+        account: read.account,
+        accountLabel: read.label,
+        grant: 'active',
+        expiresAt: answer.grant.expiresAt,
+      };
+    } catch (error) {
+      if (error instanceof ReusePending) return { ...known, grant: 'approval_pending' };
+      const refused = error instanceof ApiRefusal ? REFUSED_GRANT_STATES[error.code] : undefined;
+      if (refused === 'revoked') revokedKeys.add(id);
+      return { ...known, grant: refused ?? 'unknown' };
+    }
+  };
+
+  const rowsOf = async (agents: ReadonlyArray<{ slot: string; name: string | null }>) => {
+    const rows: AgentRow[] = [];
+    for (const agent of agents) rows.push(await rowOf(agent));
+    return rows;
+  };
+
+  /** A refusal that lists the caller's agents, so the agent asks the user. */
+  const choiceRefusal = async (why: string): Promise<SignerError> => {
+    const { slots } = await theAgents();
+    const rows = await rowsOf(await keys.described(slots));
+    return new SignerError(`${why}\n\n${agentsText(rows)}`);
+  };
+
+  /** The `agent` of a tool call, and the rest of its input. */
+  const splitAgent = (
+    args: unknown,
+  ): { agent: string | undefined; rest: Record<string, unknown> } => {
+    const { agent, ...rest } = (args ?? {}) as Record<string, unknown>;
+    if (agent === undefined) return { agent: undefined, rest };
+    const parsed = agentInputSchema.safeParse(agent);
+    if (!parsed.success) {
+      throw new SignerError(
+        `agent must be the key id or the Agent name of one of this client's agents, 1 to 80 characters (${listAgentsName} lists them). Nothing was sent.`,
+      );
+    }
+    return { agent: parsed.data, rest };
+  };
+
+  const stored = async (given?: string): Promise<{ slot: string; key: SessionKey }> => {
+    const { slots } = await theAgents();
+    const slot = slots.length === 0 ? null : await resolveAgent(given, slots);
     const secret = slot === null ? null : await store.load(slot);
     if (slot === null || secret === null) {
       throw new SignerError(
@@ -629,16 +911,19 @@ export function createSignerServer(options: {
 
   /** A caller that reused a key does nothing before the owner approved it. */
   const admitReuse = async (slot: string, key: SessionKey): Promise<void> => {
-    const gate = await pendingReuse(key);
+    const gate = await pendingReuse(slot, key);
     if (gate === null) return;
     if (gate.approvedFor !== null) {
       log(`the key in ${slot} changed: this agent's reuse waits for the owner's approval again`);
       gate.approvedFor = null;
     }
-    const pending = async () =>
-      new SignerError(
-        `The approval of this agent is pending: it asked to reuse the ${await keyWords(slot)}, and the owner has not approved it yet in the Denaria app with their Passkey. Until then this agent reads and trades nothing, so nothing was sent. Call connect for the link and the QR code that approve it.`,
+    const pending = async () => {
+      const others = await othersGoOn();
+      const connectCall = others === '' ? 'connect' : `connect with {"agent": "${slot}"}`;
+      return new ReusePending(
+        `The approval of this agent is pending: it asked to reuse the ${await keyWords(slot)}, and the owner has not approved it yet in the Denaria app with their Passkey. Until then this agent reads and trades nothing, so nothing was sent. Call ${connectCall} for the link and the QR code that approve it.${others}`,
       );
+    };
     let approved: boolean;
     try {
       approved = await reuseApproved(key, gate.request);
@@ -693,13 +978,41 @@ export function createSignerServer(options: {
     }
   };
 
-  /** This key's Grant, read after a fresh login. */
-  const readGrant = async (slot: string, key: SessionKey): Promise<AgentGrant> => {
-    await session.login(key);
-    const grant = answerOf(denariaGetGrant, await session.read(key, denariaGetGrant.api.procedure));
+  /** This key's Grant, with the name and the Account it gives. */
+  const grantRead = async (slot: string, key: SessionKey): Promise<AgentGrant> => {
+    const grant = answerOf(denariaGetGrant, await accountRead(key, denariaGetGrant.api.procedure));
+    learnAccount(key, grant);
     await followName(slot, grant.grant);
     return grant;
   };
+
+  /** This key's Grant, read after a fresh login. */
+  const readGrant = async (slot: string, key: SessionKey): Promise<AgentGrant> => {
+    await session.login(key);
+    return grantRead(slot, key);
+  };
+
+  /** The Account of this key's Grant, with its label: as known, else read;
+   *  null when it cannot be read. */
+  const accountOf = async (key: SessionKey): Promise<KnownAccount | null> => {
+    const known = accounts.get(publicKeyRefOf(key));
+    if (known !== undefined) return known;
+    try {
+      return learnAccount(
+        key,
+        answerOf(denariaGetGrant, await accountRead(key, denariaGetGrant.api.procedure)),
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const agentRef = async (slot: string, account: KnownAccount | null): Promise<AgentRef> => ({
+    keyId: slot,
+    name: await keys.nameOf(slot),
+    account: account?.account ?? null,
+    accountLabel: account?.label ?? null,
+  });
 
   /** The QR of a link (Q107), made here and never sent anywhere: the image
    *  and the text QR, or with qr "window" the image opened on this computer. */
@@ -752,7 +1065,7 @@ export function createSignerServer(options: {
     renews?: string,
   ): Promise<CallToolResult> => {
     const name = await keys.nameOf(slot);
-    const gate = await pendingReuse(key);
+    const gate = await pendingReuse(slot, key);
     const reuse = gate === null ? undefined : reuseOfLink(gate.request);
     // A connect link draws its own one-time value, so its code is new with
     // every link (Q147); a renewal shows the key of the user's Grant, named
@@ -774,6 +1087,7 @@ export function createSignerServer(options: {
     }
     const fingerprint = await agentKeyFingerprint(key.publicKey);
     const where = store.describe(slot);
+    const several = (await theAgents()).slots.length > 1;
     const { image, shown, output: qrOutput } = await showQr(slot, link, qr);
     const output: ConnectOutput = {
       status: 'confirm_on_phone',
@@ -799,6 +1113,7 @@ export function createSignerServer(options: {
       lead: leads === '' ? null : leads,
       qr: shown,
       approval: renews === undefined ? 'connect' : 'renew',
+      again: several ? slot : null,
     });
     return {
       content: [...(image === null ? [] : [image]), { type: 'text', text }],
@@ -815,7 +1130,7 @@ export function createSignerServer(options: {
   ): Promise<CallToolResult> => {
     const existing = await store.load(slot);
     const key = existing === null ? null : SessionKey.fromSecret(existing);
-    const gate = await pendingReuse(key);
+    const gate = await pendingReuse(slot, key);
     let lead = gate === null ? given : joinLeads(given, await pendingLead(slot));
     if (key === null) {
       return linkAnswer(slot, await createKey(slot), 'new_key', lead, null, qr);
@@ -859,8 +1174,9 @@ export function createSignerServer(options: {
             // Rotation is "revoke and reconnect" (spec, Agent signer): the
             // revoked key never signs again, a new key gets a new Grant, in
             // the same slot and with the same Agent name.
+            revokedKeys.add(publicKeyRefOf(key));
             const fresh = await rotateKey(slot, key);
-            session.reset();
+            session.forget(key);
             return linkAnswer(slot, fresh, 'rotated', lead, null, qr);
           }
           case 'expired':
@@ -925,6 +1241,48 @@ export function createSignerServer(options: {
     return { content: [{ type: 'text', text }], structuredContent: output };
   };
 
+  /** Checks that the key a caller with agents asks to add is on this
+   *  computer, else refuses with the other keys on it, none of the caller's
+   *  own (ticket 04). */
+  const checkKeyToAdd = async (slot: string, among: readonly string[]): Promise<void> => {
+    const onComputer = await keys.onComputer();
+    if (onComputer.some((key) => key.slot === slot)) return;
+    const others = onComputer.filter((key) => !among.includes(key.slot));
+    throw new SignerError(
+      [
+        `There is no key ${quoted(slot)} on this computer for ${target.env}, so nothing was added. Call connect again with {"reuse": "<key id>"} and the key id of another agent's key, or with {"name": "<Agent name>"} for a new agent with a key of its own.`,
+        '',
+        ...(others.length === 0
+          ? ['No other agent has a key on this computer.']
+          : [
+              'The keys of other agents on this computer:',
+              ...others.map((key) => {
+                const users =
+                  key.usedBy.length === 0
+                    ? 'used by no agent now'
+                    : `used by ${listOf(key.usedBy.map(callerWords))}`;
+                return `- ${key.name === null ? 'unnamed' : `"${key.name}"`} (key id ${key.slot}): ${users}.`;
+              }),
+            ]),
+      ].join('\n'),
+    );
+  };
+
+  /** A reused key joins a caller's agents only under a name none of its live
+   *  agents has (trimmed, any case): a name means one agent of a client. The
+   *  user renames in the app, never the Signer. */
+  const refuseNameInUse = async (slot: string, among: readonly string[]): Promise<void> => {
+    const name = await keys.nameOf(slot);
+    if (name === null) return;
+    const same = (await keys.described(among)).filter((agent) => sameAgentName(agent.name, name));
+    const live = (await rowsOf(same)).filter((row) => row.grant !== 'revoked');
+    const [taken] = live;
+    if (taken === undefined) return;
+    throw new SignerError(
+      `The key ${slot} is the agent ${quoted(name)}, and this client already has an agent named ${quoted(taken.name ?? name)} (key id ${taken.keyId}), so the key was not added: two agents of one client never share a name. Ask the user to rename one of them in the Denaria app (${RENEW_WHERE}), then call connect again with {"reuse": "${slot}"}.`,
+    );
+  };
+
   /**
    * A caller taking a key another agent made (ticket 20, Q102, scan P-08): it
    * never inherits the key's live Grant. The request is recorded with a
@@ -935,9 +1293,20 @@ export function createSignerServer(options: {
    * (expired, revoked, never installed) gets the usual link, carrying the
    * reference too. A Grant written at sponsorship but not confirmed yet, or a
    * Grant Denaria cannot be asked about, is not reused now.
+   *
+   * A caller that has agents already (`among`) keeps them: the key is added
+   * as one more agent, its request on that agent's entry (multi-strategy
+   * agents, ticket 04, Q211), so only that agent waits for the approval. Its
+   * Agent name must not be the name of one of the caller's live agents.
    */
-  const reuseKey = async (identity: string, slot: string, qr: QrMode): Promise<CallToolResult> => {
-    await keys.find(slot);
+  const reuseKey = async (
+    identity: string,
+    slot: string,
+    qr: QrMode,
+    among: readonly string[] = [],
+  ): Promise<CallToolResult> => {
+    if (among.length === 0) await keys.find(slot);
+    else await checkKeyToAdd(slot, among);
     const secret = await store.load(slot);
     if (secret === null) {
       throw new SignerError(
@@ -963,13 +1332,19 @@ export function createSignerServer(options: {
         throw error;
       }
     }
-    const mapped = await keys.reuse(identity, slot, {
+    const request = {
       requestedAt: new Date(now()).toISOString(),
       reference: randomBytes(16).toString('base64url'),
-    });
-    resolved = mapped;
+    };
+    let mapped = slot;
+    if (among.length === 0) {
+      mapped = await keys.reuse(identity, slot, request);
+    } else {
+      await refuseNameInUse(slot, among);
+      await keys.reuseAsAgent(identity, slot, request);
+    }
     // Another Signer of this caller may have mapped it first: its entry holds.
-    reuseGate = undefined;
+    reuseGates.delete(mapped);
     log(
       `connect: this agent asks to reuse the key in ${store.describe(mapped)}; the owner approves it with the Passkey`,
     );
@@ -977,67 +1352,190 @@ export function createSignerServer(options: {
     return linkAnswer(slot, key, 'reuse', await pendingLead(slot), null, qr, live.permissionId);
   };
 
+  /**
+   * `connect` of a Signer started with `--name` (ticket 03, Q207): its one
+   * agent, made at its first connect as before, and no other. Another name,
+   * another agent or any reuse is refused; its own name or key id answers
+   * about its agent, as a connect without arguments does.
+   */
+  const connectPinned = async (
+    pinnedName: string,
+    identity: string,
+    slot: string | undefined,
+    input: z.infer<typeof connectInput>,
+  ): Promise<CallToolResult> => {
+    const { name, agent, reuse, qr } = input;
+    if (reuse !== undefined) {
+      throw pinnedRefusal(
+        `it reuses no key (${quoted(reuse)} was asked), so nothing was changed.`,
+        slot,
+      );
+    }
+    if (name !== undefined && !(await namesPinned(name, slot))) {
+      throw pinnedRefusal(`${quoted(name)} is not its name, so no agent was made.`, slot);
+    }
+    if (agent !== undefined && !(await namesPinned(agent, slot))) {
+      throw pinnedRefusal(`${quoted(agent)} is not that agent. Nothing was sent.`, slot);
+    }
+    if (slot !== undefined) return connectSlot(slot, null, qr);
+    if (agent !== undefined) {
+      throw new SignerError(
+        `This agent has no key on this computer yet, so none is ${quoted(agent)}. Call connect without agent: it makes this agent's key.`,
+      );
+    }
+    const made = await keys.create(identity, pinnedName, new Date(now()).toISOString());
+    return connectSlot(made, null, qr);
+  };
+
   const connect = async (args: unknown): Promise<CallToolResult> => {
     // Clients may send no arguments at all for a tool without required ones.
     const input = connectInput.safeParse(args ?? {});
     if (!input.success) {
       return failure(
-        `The name must be 1 to ${AGENT_LABEL_MAX_LENGTH} characters, with no control characters, and reuse a key id connect listed. Call connect again with a valid name, or without one.`,
+        `The name must be 1 to ${AGENT_LABEL_MAX_LENGTH} characters, with no control characters, reuse a key id connect listed, and agent the key id or Agent name of one of this client's agents (1 to 80 characters). Call connect again with a valid name, or without one.`,
       );
     }
-    const { name, reuse, qr } = input.data;
+    const { name, reuse, agent, qr } = input.data;
     if (name !== undefined && reuse !== undefined) {
       return failure(
         'Give either a name for a new agent or the key id to reuse, not both. Call connect again with one of them.',
+      );
+    }
+    if (agent !== undefined && (name !== undefined || reuse !== undefined)) {
+      return failure(
+        'Give agent to check one of the agents of this client, or a name for a new agent, or the key id to reuse, not two of them. Call connect again with one of them.',
       );
     }
     try {
       return await serialized(async () => {
         store.ready?.();
         const identity = identityOf();
-        const known = await slotOf(name);
-        if (known !== null) {
-          const current = await keys.nameOf(known);
-          const lead =
-            reuse !== undefined && reuse !== known
-              ? `This agent already has its own key (key id ${known}), so it was kept. Another agent with another key starts its own Signer with --name "<Agent name>".`
-              : name !== undefined && commandName === null && name !== current
-                ? `This agent already has its name${current === null ? '' : `, ${current}`}. The user renames it in the Denaria app: ${RENEW_WHERE}.`
-                : null;
-          return connectSlot(known, lead, qr);
+        const { slots, claimed } = await theAgents(name);
+        const [first] = slots;
+        if (commandName !== null) return connectPinned(commandName, identity, first, input.data);
+        if (first === undefined) {
+          if (agent !== undefined) {
+            throw new SignerError(
+              `This client has no Denaria agent on this computer yet, so none is ${quoted(agent)}. Call connect without agent: it asks for this agent's name.`,
+            );
+          }
+          if (reuse !== undefined) return reuseKey(identity, reuse, qr);
+          if (name === undefined) return chooseAgent();
+          const slot = await keys.create(identity, name, new Date(now()).toISOString());
+          return connectSlot(slot, null, qr);
         }
-        if (reuse !== undefined) return reuseKey(identity, reuse, qr);
-        const chosen = commandName ?? name;
-        if (chosen === undefined) return chooseAgent();
-        const slot = await keys.create(identity, chosen, new Date(now()).toISOString());
-        resolved = slot;
-        return connectSlot(slot, null, qr);
+        // This call took the 0.1.0 key: it is this caller's first connect.
+        if (claimed && agent === undefined && reuse === undefined) {
+          return connectSlot(first, null, qr);
+        }
+        if (agent !== undefined) return connectSlot(await resolveAgent(agent, slots), null, qr);
+        if (name !== undefined) return newAgent(identity, name, slots, qr);
+        if (reuse !== undefined) {
+          if (!slots.includes(reuse)) return reuseKey(identity, reuse, qr, slots);
+          return connectSlot(
+            reuse,
+            `This client already has the key id ${reuse} among its agents, so nothing was added: this is that agent.`,
+            qr,
+          );
+        }
+        if (slots.length > 1) {
+          throw await choiceRefusal(
+            `This client has ${slots.length} Denaria agents. Call connect with {"agent": "<key id>"} for the one to check or link (ask the user which, never pick one), or with {"name": "<Agent name>"} for one more agent. Nothing was changed.`,
+          );
+        }
+        return connectSlot(first, null, qr);
       });
     } catch (error) {
       return report('connect', error);
     }
   };
 
-  const readTool = async (tool: AgentAccountTool): Promise<CallToolResult> => {
+  /**
+   * `connect` with a name, for a caller that has agents (multi-strategy
+   * agents, ticket 02). A name means one agent: when one live agent of the
+   * caller has it (trimmed, any case; live unless its Grant was revoked, and
+   * one whose Grant cannot be read counts as live), the answer is that
+   * agent's, as with `agent`, so a resent connect makes nothing new; two or
+   * more is refused with the list. Otherwise one more agent: a new key in a
+   * new slot, the name claimed in the index first, so of two Signers of this
+   * caller making it at once one makes it and the other answers about it.
+   */
+  const newAgent = async (
+    identity: string,
+    name: string,
+    slots: readonly string[],
+    qr: QrMode,
+  ): Promise<CallToolResult> => {
+    /** The caller's agents with this name, and the live ones among them. */
+    const named = async (among: readonly string[]) => {
+      const same = (await keys.described(among)).filter((agent) => sameAgentName(agent.name, name));
+      const rows = await rowsOf(same);
+      return { same, live: rows.filter((row) => row.grant !== 'revoked') };
+    };
+    const existing = (keyId: string) =>
+      connectSlot(
+        keyId,
+        `This client already has an agent named ${quoted(name)} (key id ${keyId}), so no new agent was made: this is that agent.`,
+        qr,
+      );
+    const ambiguous = () =>
+      choiceRefusal(
+        `${quoted(name)} is the Agent name of several agents of this client, so no new agent was made. Call connect with {"agent": "<key id>"} for the one to check or link (ask the user which); for a new agent, ask the user for another name.`,
+      );
+    const { same, live } = await named(slots);
+    const [one] = live;
+    if (live.length > 1) throw await ambiguous();
+    if (one !== undefined) return existing(one.keyId);
+    const slot = await keys.addAgent(
+      identity,
+      name,
+      same.map((agent) => agent.slot),
+      new Date(now()).toISOString(),
+    );
+    if (slot !== null) {
+      log(`connect: one more agent of this client, in ${store.describe(slot)}`);
+      return connectSlot(slot, null, qr);
+    }
+    // Another Signer of this caller holds the claim: its agent is in the
+    // index a moment later (a few small file writes).
+    const polls = Math.max(1, Math.ceil(rotationWait.timeoutMs / rotationWait.intervalMs));
+    for (let poll = 0; poll <= polls; poll++) {
+      if (poll > 0) await sleep(rotationWait.intervalMs);
+      const current = await named((await theAgents()).slots);
+      const [winner] = current.live;
+      if (current.live.length > 1) throw await ambiguous();
+      if (winner !== undefined) return existing(winner.keyId);
+    }
+    throw await choiceRefusal(
+      `Another Denaria Agent Signer of this client is making an agent named ${quoted(name)} and has not finished, so no new agent was made. Call connect again in a moment, with {"name": ${quoted(name)}}.`,
+    );
+  };
+
+  const readTool = async (tool: AgentAccountTool, args: unknown): Promise<CallToolResult> => {
     try {
-      const { slot, key } = await stored();
-      // Every account answer has these two (agent-schemas account.ts).
+      const { slot, key } = await stored(splitAgent(args).agent);
+      // Every account answer has these (agent-schemas account.ts).
       const output = tool.output as z.ZodType<{
         network: AgentNetwork;
+        account: string;
+        accountLabel?: string | undefined;
         grant: { expiresAt: string };
       }>;
-      const answer = answerOf({ output }, await session.read(key, tool.api.procedure));
+      const answer = answerOf({ output }, await accountRead(key, tool.api.procedure));
+      const account = learnAccount(key, answer);
       if (tool === denariaGetGrant) await followName(slot, (answer as AgentGrant).grant);
+      const structured = { ...answer, agent: await agentRef(slot, account) };
       const text = [
         network.notice,
         '',
+        agentLine(structured.agent),
         `The Grant expires at ${answer.grant.expiresAt}.`,
         '',
-        JSON.stringify(answer, null, 2),
+        JSON.stringify(structured, null, 2),
       ].join('\n');
       return {
         content: [{ type: 'text', text }],
-        structuredContent: answer as unknown as Record<string, unknown>,
+        structuredContent: structured as unknown as Record<string, unknown>,
       };
     } catch (error) {
       return report(agentToolName(tool, network), error);
@@ -1052,21 +1550,23 @@ export function createSignerServer(options: {
     return parsed.data;
   };
 
-  const operationAnswer = (operation: AgentOperation): CallToolResult => {
+  const operationAnswer = (operation: AgentOperation, agent: AgentRef): CallToolResult => {
+    const structured = { ...operation, agent };
     const text = [
       network.notice,
       '',
+      agentLine(agent),
       ...(operation.summary !== null ? [operation.summary] : []),
       `State: ${operation.state}. ${operation.detail}`,
       ...(operation.failure !== null ? [`Why: ${operation.failure}`] : []),
       `Reference: ${operation.reference} (${agentToolName(denariaGetAgentOperationStatus, network)}).`,
       `The Grant expires at ${operation.grantExpiresAt}.`,
       '',
-      JSON.stringify(operation, null, 2),
+      JSON.stringify(structured, null, 2),
     ].join('\n');
     return {
       content: [{ type: 'text', text }],
-      structuredContent: operation as unknown as Record<string, unknown>,
+      structuredContent: structured as unknown as Record<string, unknown>,
     };
   };
 
@@ -1081,11 +1581,9 @@ export function createSignerServer(options: {
   /** The Grant's account, markets and v4 settings, read before the first signature of an
    *  operation: what its UserOp is held to (ticket 20). */
   const grantToCheck = async (key: SessionKey): Promise<GrantToCheck> => {
-    const answer = answerOf(
-      denariaGetGrant,
-      await session.read(key, denariaGetGrant.api.procedure),
-    );
+    const answer = answerOf(denariaGetGrant, await accountRead(key, denariaGetGrant.api.procedure));
     const limits = answer.grant.limits;
+    learnAccount(key, answer);
     return {
       account: answer.account,
       markets: limits?.markets ?? 'any',
@@ -1147,12 +1645,13 @@ export function createSignerServer(options: {
     // then on it may land even when its answer is lost.
     let sent: string | null = null;
     try {
+      const { agent, rest } = splitAgent(args);
       const request = {
         action: tool.name.slice('denaria_'.length) as AgentExecutionAction,
-        input: inputOf(tool, args),
+        input: inputOf(tool, rest),
       } as ToolRequest;
-      const { key } = await stored();
-      let step = stepOf(await session.mutate(key, tool.api.procedure, args ?? {}));
+      const { slot, key } = await stored(agent);
+      let step = stepOf(await session.mutate(key, tool.api.procedure, rest));
       let grant: GrantToCheck | null = null;
       let first: { reference: string; userOp: SignStep['userOp'] } | null = null;
       for (let signatures = 0; step.step === 'sign'; signatures++) {
@@ -1192,7 +1691,8 @@ export function createSignerServer(options: {
           }),
         );
       }
-      return operationAnswer(answerOf(tool, step.operation));
+      const operation = answerOf(tool, step.operation);
+      return operationAnswer(operation, await agentRef(slot, await accountOf(key)));
     } catch (error) {
       if (error instanceof ApiUnreachable) {
         return report(name, lostAnswer(error, sent));
@@ -1216,10 +1716,13 @@ export function createSignerServer(options: {
   const statusTool = async (args: unknown): Promise<CallToolResult> => {
     const tool = denariaGetAgentOperationStatus;
     try {
-      inputOf(tool, args);
-      const { key } = await stored();
+      const { agent, rest } = splitAgent(args);
+      inputOf(tool, rest);
+      const { slot, key } = await stored(agent);
+      const ref = await agentRef(slot, await accountOf(key));
       return operationAnswer(
-        answerOf(tool, await session.read(key, tool.api.procedure, args ?? {})),
+        answerOf(tool, await session.read(key, tool.api.procedure, rest)),
+        ref,
       );
     } catch (error) {
       return report(agentToolName(tool, network), error);
@@ -1234,6 +1737,55 @@ export function createSignerServer(options: {
   const accountTools = new Map<string, AgentAccountTool>(
     AGENT_ACCOUNT_TOOLS.map((tool) => [agentToolName(tool, network), tool]),
   );
+
+  const listAgents = async (): Promise<CallToolResult> => {
+    try {
+      const { slots } = await theAgents();
+      const rows = await rowsOf(await keys.described(slots));
+      const output: z.infer<typeof listAgentsOutput> = { network, agents: rows };
+      const text = [
+        network.notice,
+        '',
+        rows.length === 0
+          ? 'This client has no Denaria agent on this computer yet: call connect.'
+          : agentsText(rows),
+        ...(rows.length > 1
+          ? [
+              '',
+              'Every Denaria tool needs agent, the key id or the Agent name of the agent that acts: ask the user which one when it is not clear, never pick one.',
+            ]
+          : []),
+      ].join('\n');
+      return { content: [{ type: 'text', text }], structuredContent: output };
+    } catch (error) {
+      return report(listAgentsName, error);
+    }
+  };
+
+  // `agent` on every account tool and trade, and the agent each answer is
+  // about: the shared shapes in @denaria/agent-schemas stay the API's.
+  const agentProperty = {
+    type: 'string',
+    minLength: 1,
+    maxLength: 80,
+    description: `Which of this client's Denaria agents acts: its key id, or its Agent name (trimmed, any case, the latest name the user gave it in Denaria). Required when this client has two or more agents: never guess it, ask the user. With one agent it may be omitted; if given, it must name that agent. A Signer started with --name acts for its one agent only. ${listAgentsName} lists the agents.`,
+  };
+  const { $schema: _refDialect, ...agentRefJson } = objectJsonSchema(agentRefSchema, 'output');
+  const withAgent = (schemas: ReturnType<typeof agentToolJsonSchemas>) => {
+    const properties = (schema: { [key: string]: unknown }) =>
+      (schema.properties ?? {}) as Record<string, unknown>;
+    return {
+      inputSchema: {
+        ...schemas.inputSchema,
+        properties: { ...properties(schemas.inputSchema), agent: agentProperty },
+      },
+      outputSchema: {
+        ...schemas.outputSchema,
+        properties: { ...properties(schemas.outputSchema), agent: agentRefJson },
+        required: [...(schemas.outputSchema.required ?? []), 'agent'],
+      },
+    };
+  };
 
   const tools = [
     {
@@ -1250,23 +1802,44 @@ export function createSignerServer(options: {
         openWorldHint: false,
       },
     },
-    ...[
-      ...accountTools,
-      ...executionTools,
-      [statusToolName, denariaGetAgentOperationStatus] as const,
-    ].map(([name, tool]) => ({
+    ...[...accountTools].map(([name, tool]) => ({
       name,
       title: tool.title,
       description: tool.description,
-      ...agentToolJsonSchemas(tool),
+      ...withAgent(agentToolJsonSchemas(tool)),
       annotations: { title: tool.title, ...tool.annotations },
     })),
+    {
+      name: listAgentsName,
+      title: "This client's Denaria agents",
+      description:
+        "The Denaria agents of this client on this computer, oldest first: for each, its Agent name, key id and key fingerprint, the Account its Grant is on (address), and its Grant's state and expiry (unknown when they cannot be read now). Every agent has its own key, Grant and Account, one per strategy of the user. With two or more agents every Denaria tool needs agent, the key id or Agent name of the one that acts: ask the user which one, never pick one. It needs no Grant, and signs in only with agents whose Grant may be live.",
+      inputSchema: objectJsonSchema(z.object({}).strict(), 'input'),
+      outputSchema: objectJsonSchema(listAgentsOutput, 'output'),
+      annotations: {
+        title: "This client's Denaria agents",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    ...[...executionTools, [statusToolName, denariaGetAgentOperationStatus] as const].map(
+      ([name, tool]) => ({
+        name,
+        title: tool.title,
+        description: tool.description,
+        ...withAgent(agentToolJsonSchemas(tool)),
+        annotations: { title: tool.title, ...tool.annotations },
+      }),
+    ),
   ];
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, (call) => {
     if (call.params.name === 'connect') return connect(call.params.arguments);
     const tool = accountTools.get(call.params.name);
-    if (tool) return readTool(tool);
+    if (tool) return readTool(tool, call.params.arguments);
+    if (call.params.name === listAgentsName) return listAgents();
     const execution = executionTools.get(call.params.name);
     if (execution) return executeTool(execution, call.params.arguments);
     if (call.params.name === statusToolName) return statusTool(call.params.arguments);

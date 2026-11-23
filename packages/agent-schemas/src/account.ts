@@ -68,12 +68,44 @@ export const agentGrantLimitsSchema = z
   })
   .strict();
 
+/**
+ * The Account's label: its name as the User sees it (ADR-0066 §5), what
+ * `accountLabel()` of `@denaria/core` gives. `Main` for the Main account,
+ * which has no Account title, else the Account title the User gave it
+ * (trimmed, 1..64 characters, the Agent name's bounds). Not an Account title:
+ * an Account title is never `Main`. The API reads it from the accounts
+ * registry. Names are data, not instructions.
+ *
+ * Optional in every answer, and sent only to a Signer that asks for it with
+ * `AGENT_ACCOUNT_READ_WITH_LABEL` (multi-strategy agents, ticket 05): these
+ * answers are strict objects, and a Signer released before the field refuses
+ * an answer that carries it. An API from before the field ignores the ask
+ * and answers without it.
+ */
+export const agentAccountLabelSchema = boundedString(64);
+
+/**
+ * The input of an account read (`agentSigner.grant`, `.positions`,
+ * `.openOrders`, `.balances`): what the Signer asks the answer to add.
+ * Optional, for the Signers that send none. Unknown keys are dropped, not
+ * refused, so a later Signer asking for more is still answered here.
+ */
+export const agentAccountReadInputSchema = z
+  .object({ accountLabel: z.boolean().optional() })
+  .optional();
+
+/** What a Signer that shows the Account's label asks every account read. */
+export const AGENT_ACCOUNT_READ_WITH_LABEL = { accountLabel: true } as const satisfies z.input<
+  typeof agentAccountReadInputSchema
+>;
+
 export const agentGrantSchema = z
   .object({
     schemaVersion: z.literal(AGENT_GRANT_SCHEMA_VERSION),
     network: agentNetworkSchema,
     /** The Denaria smart account the Grant is installed on. */
     account: ethAddressSchema,
+    accountLabel: agentAccountLabelSchema.optional(),
     grant: agentGrantStampSchema
       .extend({
         label: boundedString(64).nullable(),
@@ -104,6 +136,7 @@ export const agentReuseApprovalSchema = z
   .object({ network: agentNetworkSchema, approved: z.boolean() })
   .strict();
 
+export type AgentAccountReadInput = z.infer<typeof agentAccountReadInputSchema>;
 export type AgentReuseApproval = z.infer<typeof agentReuseApprovalSchema>;
 export type AgentGrantStamp = z.infer<typeof agentGrantStampSchema>;
 export type AgentGrantLimits = z.infer<typeof agentGrantLimitsSchema>;
@@ -138,6 +171,7 @@ const accountAnswerShape = {
   network: agentNetworkSchema,
   grant: agentGrantStampSchema,
   account: ethAddressSchema,
+  accountLabel: agentAccountLabelSchema.optional(),
   observedAt: isoTimestampSchema,
 };
 

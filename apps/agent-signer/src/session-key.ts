@@ -120,3 +120,8 @@ export class SessionKey {
     return this.toString();
   }
 }
+
+/** A key's public-key coordinates as one string, `x:y`: what this process
+ *  keys its memory of a key by (its token, its Account). Not the key id the
+ *  user sees, which is the key's slot. */
+export const publicKeyRefOf = (key: SessionKey): string => `${key.publicKey.x}:${key.publicKey.y}`;

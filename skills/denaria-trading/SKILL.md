@@ -1,6 +1,6 @@
 ---
 name: denaria-trading
-description: Trade GMX perpetuals on Denaria for the user. Use when the user asks to open, close or manage a Denaria position (BTC or ETH long or short, leverage, collateral, margin, take profit, stop loss, limit orders, funding fees), mentions Denaria or denaria.finance, or wants their agent to trade on Denaria. With the Denaria Agent Signer the agent executes within the limits the user approved with their Passkey; without it, it prepares a QR the user signs in the Denaria app.
+description: Trade GMX perpetuals on Denaria for the user. Use when the user asks to open, close or manage a Denaria position (BTC or ETH long or short, leverage, collateral, margin, take profit, stop loss, limit orders, funding fees), mentions Denaria or denaria.finance, or wants their agent to trade on Denaria, one strategy or several. With the Denaria Agent Signer the agent executes within the limits the user approved with their Passkey; without it, it prepares a QR the user signs in the Denaria app.
 ---
 
 # Trading on Denaria
@@ -37,8 +37,9 @@ Run it only after the user agrees. `--env testnet` is the test network (test fun
 `--env mainnet` is real funds; never switch one for the other. On a server, a container or a
 cloud sandbox (no system keyring), add `--store file` and an environment variable
 `DENARIA_SIGNER_PASSPHRASE` (12+ characters) to the server entry, and tell the user to keep
-that passphrase. Two agents of the same client on one computer each get `--name "<Agent
-name>"` at the end of their command. The agent may need a restart to see the new tools.
+that passphrase. One install serves every agent of this client on this computer: a new
+strategy is one more agent made with `connect` (below), never a second install. The agent may
+need a restart to see the new tools.
 
 If the install fails, or the Signer's tools do not appear or do not answer, do not guess: send
 the user to the guide in their Denaria app, Settings → Access & security → Connect an agent, on
@@ -68,6 +69,42 @@ user those limits in your own words.
 If the user's app has no **Connect an agent**, or Denaria answers that agent trading is not
 open for this account or network, the Signer cannot trade there yet: prepare QR handoffs
 instead.
+
+### Several strategies
+
+A user who tests several trading strategies gives each one its own Denaria agent on its own
+**Account**: its own key, Grant, limits, capital, positions and results, so they can see which
+one makes money. ("Strategy" is the user's word; for Denaria it is an agent on an Account.)
+
+- **A new strategy.** When the user starts one ("make a folder in my finance area, we start
+  trading with part of my gamble money"), write its notes and propose a dedicated agent and a
+  new Account: "I'll give it its own agent and account. Shall I call it Gamble?". Then call
+  `connect` with `{"name": "Gamble"}`: one more key next to this client's other agents, with no
+  change to the MCP configuration. Give the link, the QR and the connection code as usual, and
+  tell the user to choose **New account** on the phone (titled after the agent, it may be
+  already selected) and, if they want, an initial capital. If a live agent of this client
+  already has that name, `connect` makes nothing and answers about that agent: for a new
+  strategy, ask the user for another name.
+- **The notes.** Write the Agent name and the key id (`keyId` in the answer of `connect`) in
+  the strategy's notes. The key id is the stable reference: the user may rename the agent in
+  the app.
+- **Picking a strategy up.** When the user names a strategy in a later session ("let's pick up
+  the gamble strategy"), read its notes and pass `agent`, preferably the key id, on every call.
+  Once this client has two or more agents, every Denaria tool needs `agent`, reads included;
+  `denaria_list_agents` lists them (Agent name, key id, fingerprint, Account, Grant state and
+  expiry). Every answer says which agent and which Account it is about: check it is the
+  strategy's.
+- **Refused with the list.** A call with no `agent`, an unknown one, or a name two agents
+  share is refused before anything is sent, with the list of agents. Ask the user which one;
+  never pick one.
+- **Another client.** A second client on the same computer (a Codex thread on the same
+  project, say) uses an existing strategy with `connect` `{"reuse": "<key id>"}`, the key id
+  from the notes: the same key, Grant and Account, once the user approves it in the Denaria app
+  with their Passkey. Until then that agent reads and trades nothing; the client's other
+  agents go on.
+- **Strict isolation.** A Signer started with `--name` acts for that one agent only and refuses
+  any other. The user sets it up by hand, as the Signer's README explains; suggest it only when
+  they ask for strict isolation (unattended runs, large Grants).
 
 ## Trading with the Signer
 
