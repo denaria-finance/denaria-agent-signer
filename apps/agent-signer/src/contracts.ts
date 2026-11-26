@@ -12,6 +12,11 @@ export type Address = `0x${string}`;
  * says. A copy, as the
  * single file carries no config package; `test/contracts.test.ts` keeps it
  * equal to the Grant the API builds.
+ *
+ * The ExchangeRouters are GMX v2.2.1's since Signer 0.2.1 (ADR-0069, ticket
+ * 30; 0.1.4 had them first but was never published): v2.2c's stop working
+ * around 2026-11-26, so a Signer before 0.2.1 refuses every order of a Grant
+ * made on the new router.
  */
 export type SignerContracts = {
   readonly usdc: Address;
@@ -41,7 +46,7 @@ export const SIGNER_CONTRACTS: Readonly<Record<number, SignerContracts>> = {
     weth: '0x980b62da83eff3d4576c647993b0c1d7faf17c73',
     serviceFeeReceiver: '0x316f17a37e6ce68d91a761aee087fb3f7195f67b',
     gmx: {
-      exchangeRouter: '0x6b489dd5bb1aae8df246359d59aa7316760a75d2',
+      exchangeRouter: '0x3fb6d5429612588510341ea60aacc282db264295',
       referralStorage: '0xbbcda58c228bb29b5769778181c81ac8ac546c11',
       syntheticsRouter: '0x72f13a44c8ba16a678cad549f17bc9e06d2b8bd2',
     },
@@ -55,7 +60,7 @@ export const SIGNER_CONTRACTS: Readonly<Record<number, SignerContracts>> = {
     weth: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1',
     serviceFeeReceiver: '0xf723f3f37f4a0639ce8daa681ab1762d2ddad485',
     gmx: {
-      exchangeRouter: '0x7de39ff2e232a2203196788d37e234cf8f1b83f1',
+      exchangeRouter: '0x6776c2b52179bc737193de3bc75262681006aa27',
       referralStorage: '0xe6fab3f0c7199b0d34d7fbe83394fc0e0d06e99d',
       syntheticsRouter: '0x7452c558d45f8afc8c83dae62c3f8a5be19c71f6',
     },
